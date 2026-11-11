@@ -36,165 +36,165 @@
  *   Текст запроса «GET /click HTTP/1.1» вручную разбирать не нужно.
  * esp_log.h — журнал кликов.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "esp_event.h"
-#include "esp_http_server.h"
-#include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "nvs_flash.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот заголовок подключают раньше task.h. */
+#include "freertos/task.h" /* Типы задач. xTaskCreate здесь не вызывается: сервер живёт в своих задачах. */
+#include "driver/gpio.h" /* Светодиод GPIO8. Ссылки на странице меняют его уровень. */
+#include "esp_event.h" /* Цикл событий для драйвера Wi-Fi. */
+#include "esp_http_server.h" /* Принять GET, найти путь и вызвать нашу функцию. Текст запроса разбирать не нужно. */
+#include "esp_log.h" /* Журнал кликов и переключений светодиода. */
+#include "esp_netif.h" /* Интерфейс точки доступа, чтобы телефон открыл 192.168.4.1. */
+#include "esp_wifi.h" /* Поднять сеть ESP32C3-DEMO без домашнего роутера. */
+#include "nvs_flash.h" /* Калибровка радио во flash. Без неё Wi-Fi не стартует. */
 
-#define AP_SSID "ESP32C3-DEMO"
-#define AP_PASS "esp32c3demo"
-#define LED_GPIO GPIO_NUM_8
-#define LED_ON_LEVEL 0
+#define AP_SSID "ESP32C3-DEMO" /* Имя сети, к которой подключают телефон. */
+#define AP_PASS "esp32c3demo" /* Пароль этой сети. */
+#define LED_GPIO GPIO_NUM_8 /* Вывод светодиода, которым управляет страница. */
+#define LED_ON_LEVEL 0 /* Уровень, который зажигает диод. На многих платах C3 это 0, не 1. */
 
-static const char *TAG = "http";
-static int s_clicks;
-static bool s_led_on;
+static const char *TAG = "http"; /* Подпись строк монитора. */
+static int s_clicks; /* Сколько раз открыли ссылку «Нажать». Живёт, пока плата включена. */
+static bool s_led_on; /* Текущее состояние светодиода, его же печатает страница. */
 
-static void led_set(bool on)
+static void led_set(bool on) /* Включить или выключить светодиод и запомнить состояние для HTML. */
 {
-    s_led_on = on;
-    int level = on ? LED_ON_LEVEL : (1 - LED_ON_LEVEL);
-    gpio_set_level(LED_GPIO, level);
+    s_led_on = on; /* Запомнить, чтобы следующая страница показала «включён» или «выключен». */
+    int level = on ? LED_ON_LEVEL : (1 - LED_ON_LEVEL); /* Подобрать 0 или 1 с учётом полярности платы. */
+    gpio_set_level(LED_GPIO, level); /* Сразу выставить этот уровень на выводе. */
 }
 
-static void nvs_setup(void)
+static void nvs_setup(void) /* Подготовить NVS до запуска Wi-Fi. */
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    esp_err_t err = nvs_flash_init(); /* Открыть раздел калибровки радио. */
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) { /* Раздел полон или формат старый. */
+        ESP_ERROR_CHECK(nvs_flash_erase()); /* Стереть NVS. Ошибка стирания остановит программу. */
+        err = nvs_flash_init(); /* Открыть раздел ещё раз. */
     }
-    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(err); /* Иная ошибка не даст поднять точку и страницу. */
 }
 
-static void ap_start(void)
+static void ap_start(void) /* Раздать сеть, в которой телефон откроет http://192.168.4.1/. */
 {
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_ap();
+    ESP_ERROR_CHECK(esp_netif_init()); /* Стек TCP/IP. HTTP сидит поверх него. */
+    ESP_ERROR_CHECK(esp_event_loop_create_default()); /* Цикл событий, его требует драйвер Wi-Fi. */
+    esp_netif_create_default_wifi_ap(); /* Точка доступа со своим DHCP и адресом 192.168.4.1. */
 
-    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&init));
+    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT(); /* Штатные буферы драйвера. */
+    ESP_ERROR_CHECK(esp_wifi_init(&init)); /* Создать драйвер радио до задания режима. */
 
-    wifi_config_t config = {
-        .ap = {
-            .channel = 1,
-            .max_connection = 4,
-            .authmode = WIFI_AUTH_WPA2_PSK,
+    wifi_config_t config = { /* Параметры сети, которую увидит телефон. */
+        .ap = { /* Роль точки доступа: канал, число клиентов, защита. */
+            .channel = 1, /* Канал 1 в диапазоне 2.4 ГГц. */
+            .max_connection = 4, /* До четырёх клиентов, телефону этого достаточно. */
+            .authmode = WIFI_AUTH_WPA2_PSK, /* Сеть с паролем WPA2. */
         },
     };
-    strncpy((char *)config.ap.ssid, AP_SSID, sizeof(config.ap.ssid) - 1);
-    strncpy((char *)config.ap.password, AP_PASS, sizeof(config.ap.password) - 1);
-    config.ap.ssid_len = strlen(AP_SSID);
+    strncpy((char *)config.ap.ssid, AP_SSID, sizeof(config.ap.ssid) - 1); /* Имя сети в массив ssid, последний байт остаётся нулём. */
+    strncpy((char *)config.ap.password, AP_PASS, sizeof(config.ap.password) - 1); /* Пароль в массив password с тем же запасом под ноль. */
+    config.ap.ssid_len = strlen(AP_SSID); /* Длина имени для драйвера: поле ssid не всегда заканчивается нулём. */
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP)); /* Только точка доступа, в интернет через плату не уйти. */
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &config)); /* Отдать имя, пароль и канал интерфейсу точки. */
+    ESP_ERROR_CHECK(esp_wifi_start()); /* Начать рассылать имя сети. Страницу можно открывать после этого. */
 }
 
 /* Общая страница. Её отдают и «/», и действия, чтобы браузер сразу показал итог. */
-static esp_err_t send_page(httpd_req_t *request)
+static esp_err_t send_page(httpd_req_t *request) /* Собрать HTML и отдать его в ответ на текущий запрос. */
 {
-    char page[640];
-    int length = snprintf(
-        page, sizeof(page),
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
-        "<title>ESP32-C3</title></head><body>"
-        "<h1>ESP32-C3</h1>"
-        "<p>Нажатий: %d</p>"
-        "<p>Светодиод: %s</p>"
-        "<p><a href=\"/click\">Нажать</a></p>"
-        "<p><a href=\"/led?on=1\">Светодиод включить</a></p>"
-        "<p><a href=\"/led?on=0\">Светодиод выключить</a></p>"
-        "</body></html>",
-        s_clicks, s_led_on ? "включён" : "выключен");
+    char page[640]; /* Буфер страницы. Если текст сюда не влезет, ответим ошибкой, а не обрезком. */
+    int length = snprintf( /* Собрать HTML в page. Возврат — сколько байт получилось бы записать. */
+        page, sizeof(page), /* Куда писать и сколько байт можно занять, включая завершающий ноль. */
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" /* Начало документа и кодировка, чтобы русские буквы читались. */
+        "<title>ESP32-C3</title></head><body>" /* Заголовок вкладки и начало тела страницы. */
+        "<h1>ESP32-C3</h1>" /* Крупный заголовок на самой странице. */
+        "<p>Нажатий: %d</p>" /* Сюда подставится счётчик s_clicks. */
+        "<p>Светодиод: %s</p>" /* Сюда подставится слово «включён» или «выключен». */
+        "<p><a href=\"/click\">Нажать</a></p>" /* Ссылка: браузер запросит путь /click. */
+        "<p><a href=\"/led?on=1\">Светодиод включить</a></p>" /* Ссылка с параметром on=1: зажечь диод. */
+        "<p><a href=\"/led?on=0\">Светодиод выключить</a></p>" /* Ссылка с on=0: погасить диод. */
+        "</body></html>", /* Закрыть страницу. Запятая продолжает список аргументов snprintf. */
+        s_clicks, s_led_on ? "включён" : "выключен"); /* Подставить число нажатий и текст состояния светодиода. */
 
-    if (length < 0 || length >= (int)sizeof(page)) {
+    if (length < 0 || length >= (int)sizeof(page)) { /* snprintf вернул ошибку или текст не влез в буфер. */
         /* Буфер кончился раньше страницы. Честнее ответить ошибкой, чем обрезанным HTML. */
-        return httpd_resp_send_500(request);
+        return httpd_resp_send_500(request); /* Ответить кодом 500, а не отдать обрезанную страницу. */
     }
     /* Заголовок Content-Type. Без charset браузер может показать русские буквы крокозябрами. */
-    httpd_resp_set_type(request, "text/html; charset=utf-8");
+    httpd_resp_set_type(request, "text/html; charset=utf-8"); /* Сказать браузеру, что тело — HTML в UTF-8. */
     /* Отдать тело целиком. length — число байт, библиотека сама допишет заголовки HTTP. */
-    return httpd_resp_send(request, page, length);
+    return httpd_resp_send(request, page, length); /* Отдать тело целиком. Библиотека сама допишет заголовки HTTP. */
 }
 
-static esp_err_t root_get(httpd_req_t *request)
+static esp_err_t root_get(httpd_req_t *request) /* Обработчик GET /. Страницу не меняет, только показывает. */
 {
-    return send_page(request);
+    return send_page(request); /* Отдать текущие счётчик и состояние светодиода. */
 }
 
-static esp_err_t click_get(httpd_req_t *request)
+static esp_err_t click_get(httpd_req_t *request) /* Обработчик GET /click: плюс одно нажатие. */
 {
-    s_clicks++;
-    ESP_LOGI(TAG, "клик %d", s_clicks);
-    return send_page(request);
+    s_clicks++; /* Увеличить счётчик. Новое число попадёт в ту же страницу ниже. */
+    ESP_LOGI(TAG, "клик %d", s_clicks); /* Оставить след нажатия в мониторе. */
+    return send_page(request); /* Сразу показать страницу уже с новым числом. */
 }
 
-static esp_err_t led_get(httpd_req_t *request)
+static esp_err_t led_get(httpd_req_t *request) /* Обработчик GET /led: прочитать ?on= и переключить диод. */
 {
-    char query[32];
-    char value[8];
+    char query[32]; /* Кусок URL после знака вопроса, например on=1. */
+    char value[8]; /* Значение параметра on. Хватит одного символа, буфер с запасом. */
     /* Строка запроса — это часть URL после '?'. У «/» её нет, у «/led?on=1» есть. */
-    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK &&
-        httpd_query_key_value(query, "on", value, sizeof(value)) == ESP_OK) {
-        led_set(value[0] == '1');
-        ESP_LOGI(TAG, "светодиод %s", s_led_on ? "включён" : "выключен");
+    if (httpd_req_get_url_query_str(request, query, sizeof(query)) == ESP_OK && /* Достать строку запроса. У голого /led её нет. */
+        httpd_query_key_value(query, "on", value, sizeof(value)) == ESP_OK) { /* Найти в ней ключ on и записать значение. */
+        led_set(value[0] == '1'); /* '1' включает диод, любой другой первый символ гасит. */
+        ESP_LOGI(TAG, "светодиод %s", s_led_on ? "включён" : "выключен"); /* Подтвердить новое состояние в мониторе. */
     }
-    return send_page(request);
+    return send_page(request); /* Показать страницу и при удачном параметре, и если его не было. */
 }
 
-static void http_start(void)
+static void http_start(void) /* Поднять сервер на порту 80 и зарегистрировать три пути. */
 {
     /*
      * HTTPD_DEFAULT_CONFIG — порт 80, несколько задач сервера, размер стека.
      * Для трёх коротких страниц менять там нечего.
      */
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); /* Порт 80 и штатные размеры задач сервера. */
+    httpd_handle_t server = NULL; /* Сюда httpd_start запишет ручку сервера. Пока его нет. */
     /* httpd_start начинает слушать порт. Пока обработчики не зарегистрированы, путей нет. */
-    ESP_ERROR_CHECK(httpd_start(&server, &config));
+    ESP_ERROR_CHECK(httpd_start(&server, &config)); /* Начать слушать порт. Пути появятся после регистрации ниже. */
 
-    const httpd_uri_t root = {
+    const httpd_uri_t root = { /* Описание пути «/»: метод, строка и функция. */
         .uri = "/",             /* Путь из строки запроса, без имени хоста. */
         .method = HTTP_GET,     /* Только чтение страницы. POST этот пример не принимает. */
         .handler = root_get,    /* Функция, которую сервер вызовет на этот путь. */
     };
-    const httpd_uri_t click = {
-        .uri = "/click",
-        .method = HTTP_GET,
-        .handler = click_get,
+    const httpd_uri_t click = { /* Путь «/click» увеличивает счётчик. */
+        .uri = "/click", /* Этот текст браузер берёт из ссылки «Нажать». */
+        .method = HTTP_GET, /* Ссылка делает GET, поэтому метод тот же. */
+        .handler = click_get, /* Функция, которая прибавит единицу и вернёт страницу. */
     };
-    const httpd_uri_t led = {
-        .uri = "/led",
-        .method = HTTP_GET,
-        .handler = led_get,
+    const httpd_uri_t led = { /* Путь «/led» читает параметр on и переключает диод. */
+        .uri = "/led", /* Путь без знака вопроса. Сам ?on= сервер отдаёт отдельно, строкой запроса. */
+        .method = HTTP_GET, /* Ссылки включения и выключения тоже приходят как GET. */
+        .handler = led_get, /* Функция, которая разберёт on и поставит уровень на GPIO. */
     };
     /* Пока путь не зарегистрирован, запрос к нему получит ответ 404. */
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &click));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led));
-    ESP_LOGI(TAG, "откройте http://192.168.4.1/ в сети %s", AP_SSID);
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root)); /* Иначе GET / ответит 404. */
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &click)); /* Открыть путь /click. */
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led)); /* Открыть путь /led. */
+    ESP_LOGI(TAG, "откройте http://192.168.4.1/ в сети %s", AP_SSID); /* Подсказать адрес страницы и имя сети. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа: светодиод, точка доступа, затем HTTP. */
 {
-    gpio_config_t led = {
-        .pin_bit_mask = 1ULL << LED_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    gpio_config_t led = { /* Описание вывода светодиода. Пока это только переменная. */
+        .pin_bit_mask = 1ULL << LED_GPIO, /* Бит 8 в 64-битной маске выбирает GPIO8. */
+        .mode = GPIO_MODE_OUTPUT, /* Вывод сам выдаёт уровень, страница будет его менять. */
+        .pull_up_en = GPIO_PULLUP_DISABLE, /* Подтяжка вверх выходу не нужна. */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, /* Подтяжка вниз тоже не нужна. */
+        .intr_type = GPIO_INTR_DISABLE, /* Прерывание на светодиоде не нужно. */
     };
-    ESP_ERROR_CHECK(gpio_config(&led));
-    led_set(false);
+    ESP_ERROR_CHECK(gpio_config(&led)); /* Применить описание. Ошибка настройки остановит запуск. */
+    led_set(false); /* Начать с выключенного диода, чтобы страница и вывод совпали. */
 
-    nvs_setup();
-    ap_start();
-    http_start();
+    nvs_setup(); /* Хранилище до Wi-Fi. */
+    ap_start(); /* Сеть ESP32C3-DEMO, адрес 192.168.4.1. */
+    http_start(); /* Слушать порт 80. После этого ссылку можно открывать в браузере. */
 }
