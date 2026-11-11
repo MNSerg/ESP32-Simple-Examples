@@ -26,37 +26,37 @@
  * freertos/task.h — xTaskCreate запускает три задачи, vTaskDelay задаёт их ритм.
  * esp_log.h — печать из задач. У каждой строки будет подпись «tasks».
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Подключают до queue.h, semphr.h и task.h. */
+#include "freertos/queue.h"    /* Очередь измерений: producer кладёт, consumer забирает. */
+#include "freertos/semphr.h"   /* Мьютекс, которым закрываем общий счётчик. */
+#include "freertos/task.h"     /* xTaskCreate запускает задачи, vTaskDelay задаёт их паузы. */
+#include "esp_log.h"           /* Печать из задач. Подпись у строк будет «tasks». */
 
-static const char *TAG = "tasks";
+static const char *TAG = "tasks"; /* Общая подпись всех трёх задач в мониторе. */
 
 /* Одно «измерение», которое producer передаёт consumer. Очередь копирует всю структуру. */
-typedef struct {
+typedef struct { /* Пакет измерения. Очередь копирует его целиком, а не указатель. */
     int value;         /* Порядковый номер измерения, его увеличивает producer. */
     uint32_t time_ms;  /* Сколько миллисекунд прошло с запуска планировщика. */
-} sample_t;
+} sample_t; /* Имя типа: переменные измерения объявляем как sample_t. */
 
-static QueueHandle_t s_samples;
-static SemaphoreHandle_t s_counter_lock;
-static int s_shared_counter;
+static QueueHandle_t s_samples; /* Очередь готовых измерений. Саму очередь создадим в app_main. */
+static SemaphoreHandle_t s_counter_lock; /* Мьютекс счётчика. До создания в app_main он пустой. */
+static int s_shared_counter; /* Общий счётчик с нуля. Пишет counter, читает consumer. */
 
-static void producer_task(void *arg)
+static void producer_task(void *arg) /* Раз в секунду собирает измерение и кладёт копию в очередь. */
 {
-    (void)arg;
-    int value = 0;
-    while (true) {
-        sample_t sample = {
-            .value = value,
+    (void)arg; /* Аргумент задачи не используем, так нет предупреждения компилятора. */
+    int value = 0; /* Номер следующего измерения. Первое уйдёт с нулём. */
+    while (true) { /* Без конца: ритм задаёт пауза в секунду внизу цикла. */
+        sample_t sample = { /* Локальный пакет. После отправки очередь хранит уже свою копию. */
+            .value = value, /* Текущий номер кладём в поле, consumer увидит именно его. */
             /*
              * xTaskGetTickCount — сколько тиков прошло с запуска FreeRTOS.
              * portTICK_PERIOD_MS — длина одного тика в миллисекундах, обычно 10.
              * Произведение — время в миллисекундах на момент отправки.
              */
-            .time_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
+            .time_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS), /* Тики с запуска ОС переводим в миллисекунды. */
         };
         /*
          * portMAX_DELAY: если очередь заполнена, producer заснёт,
@@ -64,36 +64,36 @@ static void producer_task(void *arg)
          * ждать свободного места. Данные копируются в очередь побайтно,
          * поэтому локальная переменная sample после отправки уже не нужна.
          */
-        if (xQueueSend(s_samples, &sample, portMAX_DELAY) != pdTRUE) {
-            ESP_LOGW(TAG, "очередь не приняла измерение");
+        if (xQueueSend(s_samples, &sample, portMAX_DELAY) != pdTRUE) { /* Копируем пакет и ждём место, если четыре слота заняты. */
+            ESP_LOGW(TAG, "очередь не приняла измерение"); /* Редкое предупреждение: отправка не прошла, номер ниже всё равно шагнёт. */
         }
-        value++;
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        value++; /* Следующая отправка уйдёт с номером на единицу больше. */
+        vTaskDelay(pdMS_TO_TICKS(1000)); /* Сон на 1 с. Пока спим, ядро свободно для consumer и counter. */
     }
 }
 
-static void consumer_task(void *arg)
+static void consumer_task(void *arg) /* Ждёт пакет из очереди и печатает его вместе со счётчиком. */
 {
-    (void)arg;
-    sample_t sample;
-    while (true) {
-        if (xQueueReceive(s_samples, &sample, portMAX_DELAY) == pdTRUE) {
+    (void)arg; /* Параметр от xTaskCreate не нужен. */
+    sample_t sample; /* Сюда xQueueReceive скопирует пришедшее измерение. */
+    while (true) { /* Живёт всё время и просыпается на каждом новом пакете. */
+        if (xQueueReceive(s_samples, &sample, portMAX_DELAY) == pdTRUE) { /* Спим, пока producer не положит измерение, затем копируем его. */
             /* Читаем общий счётчик только под мьютексом. */
-            int counter_copy = 0;
-            if (xSemaphoreTake(s_counter_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
-                counter_copy = s_shared_counter;
-                xSemaphoreGive(s_counter_lock);
+            int counter_copy = 0; /* Локальная копия. Печатать её можно уже после отпускания мьютекса. */
+            if (xSemaphoreTake(s_counter_lock, pdMS_TO_TICKS(100)) == pdTRUE) { /* Берём мьютекс не дольше 100 мс, чтобы прочитать счётчик. */
+                counter_copy = s_shared_counter; /* Копируем число, пока counter не может его менять. */
+                xSemaphoreGive(s_counter_lock); /* Сразу отпускаем: держать мьютекс на время печати не нужно. */
             }
-            ESP_LOGI(TAG, "измерение %d в момент %" PRIu32 " мс, общий счётчик %d",
-                     sample.value, sample.time_ms, counter_copy);
+            ESP_LOGI(TAG, "измерение %d в момент %" PRIu32 " мс, общий счётчик %d", /* Строка: номер, время и копия общего счётчика. */
+                     sample.value, sample.time_ms, counter_copy); /* Подставляем три значения, которые только что получили. */
         }
     }
 }
 
-static void counter_task(void *arg)
+static void counter_task(void *arg) /* Каждые 200 мс прибавляет единицу к общему счётчику. */
 {
-    (void)arg;
-    while (true) {
+    (void)arg; /* Аргумент задачи не используем. */
+    while (true) { /* Крутится всё время работы, между шагами спит. */
         /*
          * Мьютекс нужен даже для «простого» s_shared_counter++.
          * На одном ядре инкремент всё равно может быть перебит посередине
@@ -101,25 +101,25 @@ static void counter_task(void *arg)
          * разложил её на несколько команд. Пока мьютекс занят, другая
          * задача, которая его ждёт, не войдёт в этот же участок.
          */
-        if (xSemaphoreTake(s_counter_lock, portMAX_DELAY) == pdTRUE) {
-            s_shared_counter++;
-            xSemaphoreGive(s_counter_lock);
+        if (xSemaphoreTake(s_counter_lock, portMAX_DELAY) == pdTRUE) { /* Ждём мьютекс сколько нужно: плюс один нельзя делать одновременно с чтением. */
+            s_shared_counter++; /* Один шаг, пока consumer не входит в этот участок. */
+            xSemaphoreGive(s_counter_lock); /* Отпускаем, чтобы consumer мог прочитать новое значение. */
         }
-        vTaskDelay(pdMS_TO_TICKS(200));
+        vTaskDelay(pdMS_TO_TICKS(200)); /* Пауза 200 мс задаёт ритм: около пяти шагов за секунду. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Создаёт очередь, мьютекс и три задачи, сама потом только спит. */
 {
-    ESP_LOGI(TAG, "три задачи: producer, consumer, counter");
+    ESP_LOGI(TAG, "три задачи: producer, consumer, counter"); /* Сообщаем, какой набор задач сейчас стартует. */
 
     /* Очередь на 4 измерения. Пятое заставит producer подождать. */
-    s_samples = xQueueCreate(4, sizeof(sample_t));
+    s_samples = xQueueCreate(4, sizeof(sample_t)); /* Четыре слота под целую sample_t. Пятая отправка заснёт. */
     /* Мьютекс создаётся свободным. Первый Take проходит сразу. */
-    s_counter_lock = xSemaphoreCreateMutex();
-    if (s_samples == NULL || s_counter_lock == NULL) {
-        ESP_LOGE(TAG, "не хватило памяти на очередь или мьютекс");
-        return;
+    s_counter_lock = xSemaphoreCreateMutex(); /* Свободный мьютекс: первый захват не ждёт. */
+    if (s_samples == NULL || s_counter_lock == NULL) { /* Хотя бы один объект не создался, памяти не хватило. */
+        ESP_LOGE(TAG, "не хватило памяти на очередь или мьютекс"); /* Пишем причину. Задачи ниже запускать нельзя. */
+        return; /* Выходим из app_main. FreeRTOS удалит задачу main, остальные ещё не созданы. */
     }
 
     /*
@@ -128,18 +128,18 @@ void app_main(void)
      * а спят на очереди и на vTaskDelay, поэтому ни одна не «займёт ядро навсегда».
      * Стек — в байтах.
      */
-    xTaskCreate(producer_task, "producer", 3072, NULL, 2, NULL);
-    xTaskCreate(consumer_task, "consumer", 3072, NULL, 2, NULL);
-    xTaskCreate(counter_task, "counter", 2048, NULL, 2, NULL);
+    xTaskCreate(producer_task, "producer", 3072, NULL, 2, NULL); /* Отправитель: имя для отладчика, стек 3072 байта, приоритет 2. */
+    xTaskCreate(consumer_task, "consumer", 3072, NULL, 2, NULL); /* Получатель с тем же приоритетом, чтобы задачи чередовались. */
+    xTaskCreate(counter_task, "counter", 2048, NULL, 2, NULL); /* Счётчик. Стек меньше: эта задача почти ничего не печатает. */
 
     /*
      * app_main — тоже задача. Когда она возвращается, FreeRTOS её удаляет.
      * Остальные задачи продолжают работать. Здесь возвращаться рано:
      * пусть main просто спит и не мешает.
      */
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "задача main жива, в очереди %u элементов",
-                 (unsigned)uxQueueMessagesWaiting(s_samples));
+    while (true) { /* Не возвращаемся из app_main, иначе FreeRTOS удалит задачу main. */
+        vTaskDelay(pdMS_TO_TICKS(5000)); /* Сон 5 с между отчётами, ядро в это время у других задач. */
+        ESP_LOGI(TAG, "задача main жива, в очереди %u элементов", /* Отчёт: main на месте и очередь не потерялась. */
+                 (unsigned)uxQueueMessagesWaiting(s_samples)); /* Сколько пакетов лежит в очереди прямо сейчас, без ожидания. */
     }
 }

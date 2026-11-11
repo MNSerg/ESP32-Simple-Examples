@@ -29,26 +29,26 @@
  *   поэтому наружу он отдаёт только единицу через очередь.
  * esp_log.h — печать. Из прерывания GPTimer её не вызывают.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
-#include "esp_timer.h"
-#include "driver/gptimer.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Базовые типы. queue.h и task.h подключают после этого файла. */
+#include "freertos/queue.h"    /* Очередь единиц из прерывания GPTimer в обычную задачу. */
+#include "freertos/task.h"     /* xTaskCreate для задачи, которая печатает срабатывания. */
+#include "esp_timer.h"         /* Системный таймер с шагом 1 мкс: период и время от старта чипа. */
+#include "driver/gptimer.h"    /* Аппаратный счётчик: порог, колбэк прерывания и запуск. */
+#include "esp_log.h"           /* Печать в монитор. Из прерывания GPTimer её не вызывают. */
 
-static const char *TAG = "hw_timer";
+static const char *TAG = "hw_timer"; /* Подпись строк примера в логе. */
 
-static QueueHandle_t s_gptimer_queue;
-static int s_esp_timer_ticks;
+static QueueHandle_t s_gptimer_queue; /* Сюда прерывание кладёт метку. Очередь создадим в app_main. */
+static int s_esp_timer_ticks; /* Сколько раз уже вызвался колбэк esp_timer. Статика начинается с нуля. */
 
 /* Колбэк esp_timer выполняется в задаче, не в прерывании. Лог здесь разрешён. */
-static void esp_timer_callback(void *arg)
+static void esp_timer_callback(void *arg) /* Раз в секунду. Мы в задаче esp_timer, поэтому лог здесь можно. */
 {
-    (void)arg;
-    s_esp_timer_ticks++;
-    int64_t now_us = esp_timer_get_time();
-    ESP_LOGI(TAG, "esp_timer тик %d, время от старта чипа %lld мкс",
-             s_esp_timer_ticks, (long long)now_us);
+    (void)arg; /* Указатель из настроек таймера не используем. */
+    s_esp_timer_ticks++; /* Порядковый номер тика для строки в мониторе. */
+    int64_t now_us = esp_timer_get_time(); /* Микросекунды от старта чипа: по ним видно, что шаг близок к секунде. */
+    ESP_LOGI(TAG, "esp_timer тик %d, время от старта чипа %lld мкс", /* Номер тика и время. Печатать можно, это не прерывание. */
+             s_esp_timer_ticks, (long long)now_us); /* Счётчик и время. long long совпадает с форматом %lld. */
 }
 
 /*
@@ -56,98 +56,98 @@ static void esp_timer_callback(void *arg)
  * Возврат true просит планировщик сразу переключиться на задачу,
  * которую разбудил xQueueSendFromISR. false — переключение можно отложить.
  */
-static bool IRAM_ATTR gptimer_alarm(gptimer_handle_t timer,
-                                    const gptimer_alarm_event_data_t *event,
-                                    void *user_ctx)
+static bool IRAM_ATTR gptimer_alarm(gptimer_handle_t timer, /* Прерывание порога. timer — какой счётчик сработал. */
+                                    const gptimer_alarm_event_data_t *event, /* Счётчик и порог на этот момент. Ниже их не читаем. */
+                                    void *user_ctx) /* Контекст регистрации: в нём передали очередь. */
 {
-    (void)timer;
-    (void)event;
-    QueueHandle_t queue = (QueueHandle_t)user_ctx;
-    uint32_t mark = 1;
-    BaseType_t wake_higher_priority = pdFALSE;
-    xQueueSendFromISR(queue, &mark, &wake_higher_priority);
-    return wake_higher_priority == pdTRUE;
+    (void)timer; /* Описатель не нужен: в примере счётчик один. */
+    (void)event; /* Поля события не читаем, задаче важен сам факт тревоги. */
+    QueueHandle_t queue = (QueueHandle_t)user_ctx; /* Достаём очередь, которую положили в колбэк при регистрации. */
+    uint32_t mark = 1; /* Метка «тревога была». Число всегда 1, важен сам элемент очереди. */
+    BaseType_t wake_higher_priority = pdFALSE; /* Сюда FromISR запишет, нужно ли сразу переключить задачу. */
+    xQueueSendFromISR(queue, &mark, &wake_higher_priority); /* Кладём метку из прерывания. Ждать свободного места нельзя. */
+    return wake_higher_priority == pdTRUE; /* true просит сразу уйти в задачу, которую разбудила очередь. */
 }
 
-static void gptimer_print_task(void *arg)
+static void gptimer_print_task(void *arg) /* Забирает метки из очереди и печатает их уже вне прерывания. */
 {
-    (void)arg;
-    uint32_t mark = 0;
-    int count = 0;
-    while (true) {
-        if (xQueueReceive(s_gptimer_queue, &mark, portMAX_DELAY) == pdTRUE) {
-            count++;
-            ESP_LOGI(TAG, "GPTimer, срабатывание %d", count);
+    (void)arg; /* xTaskCreate передаёт NULL, параметр задаче не нужен. */
+    uint32_t mark = 0; /* Сюда копируется метка. Само значение не печатаем. */
+    int count = 0; /* Сколько тревог уже обработали. Это номер в строке лога. */
+    while (true) { /* Ждём метки всё время работы. Пока их нет, задача спит. */
+        if (xQueueReceive(s_gptimer_queue, &mark, portMAX_DELAY) == pdTRUE) { /* Спим без ограничения, пока прерывание не положит метку. */
+            count++; /* Одна подтверждённая тревога, номер вырастет до печати. */
+            ESP_LOGI(TAG, "GPTimer, срабатывание %d", count); /* Строка в монитор. Отсюда, из обычной задачи, печать разрешена. */
         }
     }
 }
 
-static void start_esp_timer(void)
+static void start_esp_timer(void) /* Описывает и запускает системный таймер с периодом 1 с. */
 {
-    const esp_timer_create_args_t args = {
+    const esp_timer_create_args_t args = { /* Кого звать, из какого контекста и что делать с опоздавшим тиком. */
         .callback = esp_timer_callback, /* Кого вызвать, когда период истечёт. */
         .arg = NULL,                    /* Этот указатель пришёл бы в колбэк первым аргументом. */
         /* ESP_TIMER_TASK — колбэк в задаче. ESP_TIMER_ISR — колбэк прямо из прерывания. */
-        .dispatch_method = ESP_TIMER_TASK,
+        .dispatch_method = ESP_TIMER_TASK, /* Колбэк пойдёт в задачу, поэтому внутри можно писать в лог. */
         .name = "second", /* Имя видно в отладчике, на период не влияет. */
         /*
          * Если колбэк не успел отработать, а период уже кончился снова,
          * пропущенный вызов не копят, а пропускают. Для счётчика «раз в секунду»
          * это лучше, чем пачка догоняющих вызовов.
          */
-        .skip_unhandled_events = true,
+        .skip_unhandled_events = true, /* Опоздавший тик пропускаем, а не копим пачку догоняющих вызовов. */
     };
-    esp_timer_handle_t timer = NULL;
+    esp_timer_handle_t timer = NULL; /* Сюда create запишет описатель. Пока таймера нет. */
     /* esp_timer_create только описывает таймер. Счёт пойдёт после start_periodic. */
-    ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
+    ESP_ERROR_CHECK(esp_timer_create(&args, &timer)); /* Регистрируем таймер. Секунды ещё не считаются. */
     /* Период задаётся в микросекундах. 1000000 мкс = 1 с. */
-    ESP_ERROR_CHECK(esp_timer_start_periodic(timer, 1000000));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(timer, 1000000)); /* Период 1 с. Дальше колбэк вызывает сам драйвер. */
 }
 
-static void start_gptimer(void)
+static void start_gptimer(void) /* Собирает аппаратный счётчик: 1 МГц и тревога каждые 200 мс. */
 {
-    gptimer_config_t config = {
+    gptimer_config_t config = { /* Откуда такт, в какую сторону считаем и какая цена деления. */
         .clk_src = GPTIMER_CLK_SRC_DEFAULT, /* Источник такта выбирает драйвер. */
         .direction = GPTIMER_COUNT_UP,      /* Счётчик растёт от нуля к порогу. */
         /* 1 МГц: одна единица счётчика равна 1 микросекунде. */
-        .resolution_hz = 1000000,
+        .resolution_hz = 1000000, /* 1 МГц: одна единица счётчика равна одной микросекунде. */
     };
-    gptimer_handle_t timer = NULL;
-    ESP_ERROR_CHECK(gptimer_new_timer(&config, &timer));
+    gptimer_handle_t timer = NULL; /* Описатель появится после gptimer_new_timer. */
+    ESP_ERROR_CHECK(gptimer_new_timer(&config, &timer)); /* Занимаем свободный GPTimer. Ошибка остановит запуск. */
 
-    gptimer_alarm_config_t alarm = {
+    gptimer_alarm_config_t alarm = { /* Порог сравнения и куда прыгать после совпадения. */
         .reload_count = 0, /* После срабатывания счётчик прыгает сюда, то есть в ноль. */
         /* Срабатывание каждые 200000 мкс = 200 мс. */
-        .alarm_count = 200000,
+        .alarm_count = 200000, /* Порог 200000 мкс. При 1 МГц это тревога каждые 200 мс. */
         /* true — повторять порог, а не сработать один раз и замолчать. */
-        .flags.auto_reload_on_alarm = true,
+        .flags.auto_reload_on_alarm = true, /* После порога счётчик сбрасывается и считает снова. */
     };
-    ESP_ERROR_CHECK(gptimer_set_alarm_action(timer, &alarm));
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(timer, &alarm)); /* Записываем порог. Счётчик пока стоит. */
 
-    gptimer_event_callbacks_t callbacks = {
-        .on_alarm = gptimer_alarm,
+    gptimer_event_callbacks_t callbacks = { /* Таблица колбэков. Нужна только тревога по порогу. */
+        .on_alarm = gptimer_alarm, /* На совпадение с порогом звать gptimer_alarm из прерывания. */
     };
-    ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer, &callbacks, s_gptimer_queue));
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(timer, &callbacks, s_gptimer_queue)); /* Вешаем колбэк и передаём ему очередь как контекст. */
 
     /*
      * Порядок фиксированный: сначала enable (разрешает прерывание и
      * захватывает ресурсы), потом start (счётчик побежал).
      */
-    ESP_ERROR_CHECK(gptimer_enable(timer));
-    ESP_ERROR_CHECK(gptimer_start(timer));
+    ESP_ERROR_CHECK(gptimer_enable(timer)); /* Разрешаем прерывание и захватываем ресурсы. Счёт ещё не идёт. */
+    ESP_ERROR_CHECK(gptimer_start(timer)); /* Запускаем счётчик. Дальше порог сравнивает само железо. */
 }
 
-void app_main(void)
+void app_main(void) /* Готовит очередь и задачу печати, затем запускает оба таймера. */
 {
-    ESP_LOGI(TAG, "esp_timer раз в 1 с, GPTimer раз в 200 мс");
+    ESP_LOGI(TAG, "esp_timer раз в 1 с, GPTimer раз в 200 мс"); /* Сразу видно два периода, с которыми будем сверять лог. */
 
-    s_gptimer_queue = xQueueCreate(16, sizeof(uint32_t));
-    if (s_gptimer_queue == NULL) {
-        ESP_LOGE(TAG, "нет памяти под очередь GPTimer");
-        return;
+    s_gptimer_queue = xQueueCreate(16, sizeof(uint32_t)); /* 16 меток. Запас, если печать на миг отстанет от таймера. */
+    if (s_gptimer_queue == NULL) { /* Очереди нет: прерыванию некуда писать, таймер не запускаем. */
+        ESP_LOGE(TAG, "нет памяти под очередь GPTimer"); /* Сообщаем, что кучи под очередь не хватило. */
+        return; /* Выходим. Задача печати и оба таймера ниже не создаются. */
     }
 
-    xTaskCreate(gptimer_print_task, "gptimer", 3072, NULL, 5, NULL);
-    start_esp_timer();
-    start_gptimer();
+    xTaskCreate(gptimer_print_task, "gptimer", 3072, NULL, 5, NULL); /* Сначала читатель: имя «gptimer», стек 3072 байта, приоритет 5. */
+    start_esp_timer(); /* Системный таймер: колбэк раз в секунду, уже из задачи. */
+    start_gptimer(); /* Аппаратный таймер: прерывание каждые 200 мс, печать через очередь. */
 }

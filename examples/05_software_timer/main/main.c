@@ -26,41 +26,41 @@
  *   Это не аппаратный таймер чипа, а служба внутри FreeRTOS.
  * esp_log.h — печать из колбэка таймера и из main.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/timers.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. timers.h опирается на них, поэтому файл первый. */
+#include "freertos/task.h"     /* vTaskDelay: пауза в main, чтобы задача не крутилась без сна. */
+#include "freertos/timers.h"   /* Программные таймеры FreeRTOS: создать и отдать команду службе. */
+#include "esp_log.h"           /* Печать из колбэков и из main. */
 
-static const char *TAG = "sw_timer";
+static const char *TAG = "sw_timer"; /* Подпись строк этого примера в мониторе. */
 
 /*
  * volatile: переменную пишут в одной задаче, а читают в другой.
  * Без volatile компилятор имеет право закэшировать старое значение
  * в регистре и не увидеть новые тики.
  */
-static volatile int s_ticks;
+static volatile int s_ticks; /* Счётчик секундных тиков. Пишет колбэк, читает main. */
 
-static void periodic_callback(TimerHandle_t timer)
+static void periodic_callback(TimerHandle_t timer) /* Служба таймеров зовёт это раз в секунду. Долго тут работать нельзя. */
 {
-    (void)timer;
-    s_ticks++;
+    (void)timer; /* Описатель таймера не нужен: период и так один. */
+    s_ticks++; /* Плюс один тик. Задача main прочитает это число в своём цикле. */
     /*
      * ESP_LOGI из колбэка программного таймера допустим, если сообщение короткое.
      * Долгую работу (сеть, запись во flash, ожидание кнопки) отсюда запускать нельзя:
      * лучше дать семафор отдельной задаче.
      */
-    ESP_LOGI(TAG, "периодический таймер, тик %d", s_ticks);
+    ESP_LOGI(TAG, "периодический таймер, тик %d", s_ticks); /* Короткий лог. Пока он печатается, другие программные таймеры ждут. */
 }
 
-static void oneshot_callback(TimerHandle_t timer)
+static void oneshot_callback(TimerHandle_t timer) /* Один вызов через 5 с. Сам этот таймер больше не повторится. */
 {
-    (void)timer;
-    ESP_LOGW(TAG, "одноразовый таймер сработал. Повторно сам он не запустится");
+    (void)timer; /* Описатель не используем: текст сообщения фиксированный. */
+    ESP_LOGW(TAG, "одноразовый таймер сработал. Повторно сам он не запустится"); /* Предупреждение: pdFALSE-таймер после вызова молчит. */
 }
 
-void app_main(void)
+void app_main(void) /* Создаёт оба таймера, запускает их и раз в 3 с печатает счётчик. */
 {
-    ESP_LOGI(TAG, "запуск двух программных таймеров");
+    ESP_LOGI(TAG, "запуск двух программных таймеров"); /* Отметка в мониторе до создания таймеров. */
 
     /*
      * Аргументы xTimerCreate:
@@ -72,14 +72,14 @@ void app_main(void)
      *
      * Таймер создаётся остановленным. Время пойдёт только после xTimerStart.
      */
-    TimerHandle_t periodic = xTimerCreate(
-        "period", pdMS_TO_TICKS(1000), pdTRUE, (void *)1, periodic_callback);
-    TimerHandle_t oneshot = xTimerCreate(
-        "once", pdMS_TO_TICKS(5000), pdFALSE, (void *)2, oneshot_callback);
+    TimerHandle_t periodic = xTimerCreate( /* Периодический таймер. Пока остановлен, секунды ещё не идут. */
+        "period", pdMS_TO_TICKS(1000), pdTRUE, (void *)1, periodic_callback); /* Имя, период 1 с, pdTRUE — повторять, id 1, колбэк. */
+    TimerHandle_t oneshot = xTimerCreate( /* Одноразовый таймер, тоже ещё стоит. */
+        "once", pdMS_TO_TICKS(5000), pdFALSE, (void *)2, oneshot_callback); /* 5 с, pdFALSE — один раз, id 2, свой колбэк. */
 
-    if (periodic == NULL || oneshot == NULL) {
-        ESP_LOGE(TAG, "таймер не создан. Часто это значит, что не хватило кучи");
-        return;
+    if (periodic == NULL || oneshot == NULL) { /* xTimerCreate вернул пусто. Чаще всего не хватило кучи. */
+        ESP_LOGE(TAG, "таймер не создан. Часто это значит, что не хватило кучи"); /* Пишем причину: без объекта колбэк не вызвать. */
+        return; /* Выходим. Запускать нечего, задача main на этом удалится. */
     }
 
     /*
@@ -87,13 +87,13 @@ void app_main(void)
      * команды таймерной задаче занята. 0 означает «не ждать»: для старта
      * из app_main очередь пуста, команда помещается сразу.
      */
-    if (xTimerStart(periodic, 0) != pdPASS || xTimerStart(oneshot, 0) != pdPASS) {
-        ESP_LOGE(TAG, "не удалось запустить таймер");
-        return;
+    if (xTimerStart(periodic, 0) != pdPASS || xTimerStart(oneshot, 0) != pdPASS) { /* Команда старта обоим. 0: очередь службы пуста, ждать не нужно. */
+        ESP_LOGE(TAG, "не удалось запустить таймер"); /* Служба не взяла команду, интервалы не пойдут. */
+        return; /* Выходим, чтобы не печатать тики так, будто таймеры идут. */
     }
 
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(3000));
-        ESP_LOGI(TAG, "main видит %d тиков периодического таймера", s_ticks);
+    while (true) { /* main остаётся жить и время от времени смотрит на s_ticks. */
+        vTaskDelay(pdMS_TO_TICKS(3000)); /* Сон 3 с. За паузу секундный таймер успевает тикнуть около трёх раз. */
+        ESP_LOGI(TAG, "main видит %d тиков периодического таймера", s_ticks); /* Сколько раз колбэк уже увеличил счётчик. */
     }
 }
