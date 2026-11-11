@@ -1,0 +1,7 @@
+CONFIG_IDF_TARGET="esp32c3"
+# Сторож задач включён самим ESP-IDF ещё до app_main.
+# Таймаут 3 секунды, чтобы учебный сбой был хорошо виден.
+# Паника вместо тихого сброса печатает причину в монитор.
+CONFIG_ESP_TASK_WDT_INIT=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=3
+CONFIG_ESP_TASK_WDT_PANIC=y

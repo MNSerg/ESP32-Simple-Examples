@@ -1,0 +1,5 @@
+CONFIG_IDF_TARGET="esp32c3"
+# Управление частотой и автоматический light sleep.
+# Без этих двух ключей esp_pm_configure не соберётся или вернёт ошибку.
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
