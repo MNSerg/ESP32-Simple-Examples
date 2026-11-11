@@ -20,7 +20,10 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 ```bash
 . $HOME/esp/esp-idf/export.sh
-for dir in examples/*/; do
+for dir in examples/*/ examples/display/*/; do
+  if [ ! -f "${dir}main/CMakeLists.txt" ]; then
+    continue
+  fi
   echo "===== $dir ====="
   idf.py -C "$dir" set-target esp32c3
   idf.py -C "$dir" build
@@ -30,3 +33,5 @@ done
 `-C` говорит `idf.py`, в какой папке проект, и из корня выходить не нужно. Первая сборка самая долгая: инструменты компилируют библиотеки ESP-IDF. Следующие примеры проходят быстрее.
 
 Перед прошивкой Wi-Fi-станции впишите имя и пароль сети в `examples/12_wifi_station/main/main.c`. Остальные примеры к роутеру не обращаются: своя точка доступа называется `ESP32C3-DEMO`, пароль `esp32c3demo`.
+
+Дисплейные проекты лежат в [display](display/README.md). Им, как и `project-name`, при первой сборке нужен интернет: библиотека u8g2 скачивается компонентным менеджером. У папки `examples/display` своего `CMakeLists.txt` нет, собирать нужно `01_flexible_menu` и `02_system_status`.

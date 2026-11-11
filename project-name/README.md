@@ -27,7 +27,7 @@
 
 Рисунок всегда идёт в буфер в памяти (`u8g2_ClearBuffer`, команды рисования, затем `u8g2_SendBuffer`). Пока `SendBuffer` не вызван, на стекле ничего не меняется. Так устроен весь полнобуферный режим u8g2, суффикс `_f` в имени профиля `72x40_er_f` как раз про это.
 
-Прерывание кнопки разобрано отдельно и с более спокойным антидребезгом в [`examples/03_button_interrupt`](../examples/03_button_interrupt/README.md). Шина, на которой сидит дисплей, — в [`examples/10_i2c_scanner`](../examples/10_i2c_scanner/README.md): сканер должен увидеть адрес `0x3C`, не стирая картинку.
+Прерывание кнопки разобрано отдельно и с более спокойным антидребезгом в [`examples/03_button_interrupt`](../examples/03_button_interrupt/README.md). Шина, на которой сидит дисплей, — в [`examples/10_i2c_scanner`](../examples/10_i2c_scanner/README.md): сканер должен увидеть адрес `0x3C`, не стирая картинку. Меню и экран характеристик на том же OLED — в [`examples/display`](../examples/display/README.md). Запись команды дисплею и чтение байта состояния — в [`examples/24_i2c_transfer`](../examples/24_i2c_transfer/README.md).
 
 ## Сборка
 

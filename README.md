@@ -43,8 +43,12 @@
 | [20_task_watchdog](examples/20_task_watchdog/README.md) | Сторожевой таймер задач |
 | [21_temperature](examples/21_temperature/README.md) | Температура кристалла |
 | [22_pm_auto_light_sleep](examples/22_pm_auto_light_sleep/README.md) | Автоматический лёгкий сон |
+| [display/01_flexible_menu](examples/display/01_flexible_menu/README.md) | Меню на OLED через u8g2 |
+| [display/02_system_status](examples/display/02_system_status/README.md) | Характеристики чипа на OLED |
+| [23_pulse_stepper](examples/23_pulse_stepper/README.md) | Длительность импульса и шаговик DRV8833 |
+| [24_i2c_transfer](examples/24_i2c_transfer/README.md) | Запись и чтение I2C, разбор ошибок |
 
-Общий указатель с командами сборки: [examples/README.md](examples/README.md).
+Раздел дисплея собран отдельно: [examples/display/README.md](examples/display/README.md). Общий указатель с командами сборки: [examples/README.md](examples/README.md).
 
 ## Сборка любого примера
 
@@ -62,4 +66,4 @@ idf.py -p /dev/ttyACM0 flash monitor
 
 Порт `/dev/ttyACM0` — обычный USB ESP32-C3. Если система показала другой, подставьте его. Выход из монитора: `Ctrl+]`.
 
-Исходный проект с дисплеем собирается так же, из каталога `project-name`. Ему нужен доступ в сеть при первой сборке: компонент дисплея `u8g2` подтягивается из интернета. Примеры из `examples` внешних компонентов не требуют.
+Исходный проект с дисплеем собирается так же, из каталога `project-name`. Ему и двум примерам в `examples/display` нужен доступ в сеть при первой сборке: компонент `u8g2` подтягивается из интернета. Остальные примеры внешних компонентов не требуют.
