@@ -29,24 +29,24 @@
  *   создание шины и i2c_master_probe: спросить адрес и дождаться ACK или NACK.
  * esp_log.h — список найденных адресов печатается в монитор, не на дисплей.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/i2c_master.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы FreeRTOS. Пауза между обходами шины берётся отсюда. */
+#include "freertos/task.h" /* vTaskDelay: пять секунд между сканированиями. */
+#include "driver/i2c_master.h" /* Мастер I2C: создать шину и спросить адрес вызовом probe. */
+#include "esp_log.h" /* Найденные адреса печатаются в монитор, не на дисплей. */
 
-#define I2C_SDA GPIO_NUM_5
-#define I2C_SCL GPIO_NUM_6
-#define I2C_PORT I2C_NUM_0
+#define I2C_SDA GPIO_NUM_5 /* Линия данных. Тот же вывод, что у дисплея в исходном проекте. */
+#define I2C_SCL GPIO_NUM_6 /* Линия такта. Её выдаёт мастер, микросхемы только слушают. */
+#define I2C_PORT I2C_NUM_0 /* Единственный контроллер I2C на ESP32-C3. */
 /* 100 кГц — спокойная скорость. OLED из исходного проекта работает и на 400 кГц. */
-#define I2C_FREQ_HZ 100000
+#define I2C_FREQ_HZ 100000 /* 100 кГц. На медленной скорости сканер устойчивее. */
 
-static const char *TAG = "i2c";
+static const char *TAG = "i2c"; /* Метка строк сканера в мониторе. */
 
-static i2c_master_bus_handle_t s_bus;
+static i2c_master_bus_handle_t s_bus; /* Ручка шины. Probe спрашивает адреса через неё. */
 
-static void i2c_setup(void)
+static void i2c_setup(void) /* Включает контроллер на GPIO5 и GPIO6. Устройства ещё не ищет. */
 {
-    i2c_master_bus_config_t bus = {
+    i2c_master_bus_config_t bus = { /* Выводы, такт и подтяжки. Контроллер включится вызовом ниже. */
         .i2c_port = I2C_PORT, /* На ESP32-C3 контроллер один, это I2C_NUM_0. */
         .sda_io_num = I2C_SDA, /* Линия данных. Её ведут и мастер, и микросхемы. */
         .scl_io_num = I2C_SCL, /* Линия такта. Её выдаёт только мастер. */
@@ -58,7 +58,7 @@ static void i2c_setup(void)
      * i2c_new_master_bus включает контроллер и возвращает ручку шины.
      * Устройств на шине эта функция ещё не ищет.
      */
-    ESP_ERROR_CHECK(i2c_new_master_bus(&bus, &s_bus));
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus, &s_bus)); /* Включает контроллер и кладёт ручку в s_bus. */
 }
 
 /*
@@ -68,67 +68,67 @@ static void i2c_setup(void)
  * Другую микросхему с тем же адресом эти два байта могут сбить с толку,
  * поэтому запись выполняется только при I2C_DEMO_WRITE == 1.
  */
-#define I2C_DEMO_WRITE 0
+#define I2C_DEMO_WRITE 0 /* 0 вырезает запись в дисплей: чужую микросхему на этом адресе легко смутить. */
 
-static void demo_write_ssd1306(uint8_t address)
+static void demo_write_ssd1306(uint8_t address) /* Как записать байты найденному устройству. Сейчас тело почти пустое. */
 {
-#if I2C_DEMO_WRITE
-    i2c_device_config_t device = {
+#if I2C_DEMO_WRITE /* В прошивку попадёт только если выше поставить 1. */
+    i2c_device_config_t device = { /* Одна микросхема: длина адреса, сам адрес и её скорость. */
         .dev_addr_length = I2C_ADDR_BIT_LEN_7, /* Обычный 7-битный адрес, не 10-битный. */
         .device_address = address,            /* Тот адрес, который только что ответил сканеру. */
         .scl_speed_hz = I2C_FREQ_HZ,          /* Скорость уже этой микросхемы, не всей шины. */
     };
-    i2c_master_dev_handle_t dev = NULL;
-    ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &device, &dev));
+    i2c_master_dev_handle_t dev = NULL; /* Ручка устройства. Её заполнит регистрация адреса на шине. */
+    ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &device, &dev)); /* Привязывает адрес к шине, иначе писать некому. */
 
-    uint8_t payload[] = {0x00, 0xAF};
-    esp_err_t err = i2c_master_transmit(dev, payload, sizeof(payload), 100);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "в 0x%02X записана команда включения дисплея", address);
-    } else {
-        ESP_LOGW(TAG, "запись в 0x%02X не удалась: %s", address, esp_err_to_name(err));
+    uint8_t payload[] = {0x00, 0xAF}; /* Для SSD1306: 0x00 значит «команда», 0xAF включает экран. */
+    esp_err_t err = i2c_master_transmit(dev, payload, sizeof(payload), 100); /* Шлёт два байта и ждёт ответ не дольше 100 мс. */
+    if (err == ESP_OK) { /* Устройство подтвердило приём, был ACK. */
+        ESP_LOGI(TAG, "в 0x%02X записана команда включения дисплея", address); /* В монитор: команда включения ушла по этому адресу. */
+    } else { /* Запись не подтвердилась. Обход остальных адресов из-за этого не прекращаем. */
+        ESP_LOGW(TAG, "запись в 0x%02X не удалась: %s", address, esp_err_to_name(err)); /* Имя ошибки в лог. Программу одна неудача не останавливает. */
     }
-    ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev));
-#else
-    (void)address;
-#endif
+    ESP_ERROR_CHECK(i2c_master_bus_rm_device(dev)); /* Снимает регистрацию: сканеру она больше не нужна. */
+#else /* Запись выключена, в прошивку попадает только строка ниже. */
+    (void)address; /* Аргумент не используем, так компилятор не предупреждает о нём. */
+#endif /* Конец куска, который собирается только при I2C_DEMO_WRITE. */
 }
 
-static void scan_once(void)
+static void scan_once(void) /* Один обход адресов 0x08…0x77. Кто дал ACK, тот есть на шине. */
 {
-    ESP_LOGI(TAG, "сканирование SDA=GPIO%d SCL=GPIO%d", I2C_SDA, I2C_SCL);
-    int found = 0;
+    ESP_LOGI(TAG, "сканирование SDA=GPIO%d SCL=GPIO%d", I2C_SDA, I2C_SCL); /* Пишем номера выводов, чтобы сверить их с проводами. */
+    int found = 0; /* Сколько адресов ответило. Ноль в конце значит пустую шину. */
 
-    for (uint8_t address = 0x08; address <= 0x77; address++) {
+    for (uint8_t address = 0x08; address <= 0x77; address++) { /* Рабочие адреса. Края диапазона спецификация резервирует. */
         /*
          * i2c_master_probe не требует заранее регистрировать устройство.
          * Таймаут — в миллисекундах. Отсутствие микросхемы — ожидаемый
          * результат почти для всех адресов, это не повод останавливать программу
          * через ESP_ERROR_CHECK.
          */
-        esp_err_t err = i2c_master_probe(s_bus, address, 20);
-        if (err == ESP_OK) {
-            found++;
-            ESP_LOGI(TAG, "  устройство отвечает по адресу 0x%02X", address);
-            if (address == 0x3C || address == 0x3D) {
-                ESP_LOGI(TAG, "  это типичный адрес OLED SSD1306, как в проекте с дисплеем");
-                demo_write_ssd1306(address);
+        esp_err_t err = i2c_master_probe(s_bus, address, 20); /* Спрашивает адрес и ждёт ACK до 20 мс. Молчание здесь нормально. */
+        if (err == ESP_OK) { /* Пришёл ACK: по этому адресу кто-то сидит. */
+            found++; /* Плюс одно устройство к итогу прохода. */
+            ESP_LOGI(TAG, "  устройство отвечает по адресу 0x%02X", address); /* Печатаем адрес двумя hex-цифрами. */
+            if (address == 0x3C || address == 0x3D) { /* Эти два адреса типичны для OLED SSD1306. */
+                ESP_LOGI(TAG, "  это типичный адрес OLED SSD1306, как в проекте с дисплеем"); /* Подсказка: такой дисплей был в исходном проекте. */
+                demo_write_ssd1306(address); /* При I2C_DEMO_WRITE равном 1 отправит команду включить экран. */
             }
         }
     }
 
-    if (found == 0) {
-        ESP_LOGW(TAG, "никто не ответил. Проверьте провода SDA, SCL, питание и землю");
-    } else {
-        ESP_LOGI(TAG, "найдено устройств: %d", found);
+    if (found == 0) { /* Ни один адрес не подтвердился. */
+        ESP_LOGW(TAG, "никто не ответил. Проверьте провода SDA, SCL, питание и землю"); /* Чаще всего виноваты провода, питание или общая земля. */
+    } else { /* Ответил хотя бы один адрес. */
+        ESP_LOGI(TAG, "найдено устройств: %d", found); /* Итог: сколько устройств дали ACK. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа: поднимает шину и повторяет сканирование. */
 {
-    i2c_setup();
-    while (true) {
-        scan_once();
-        vTaskDelay(pdMS_TO_TICKS(5000));
+    i2c_setup(); /* Сначала контроллер, потом перебор адресов. */
+    while (true) { /* Повторяем обход: устройство могли подключить после старта. */
+        scan_once(); /* Один полный проход по адресам. */
+        vTaskDelay(pdMS_TO_TICKS(5000)); /* Пять секунд паузы, чтобы лог успели прочитать. */
     }
 }

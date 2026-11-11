@@ -30,95 +30,95 @@
  *   Пока мастер выдвигает бит на MOSI, устройство одновременно выдвигает бит на MISO.
  * esp_log.h — показать отправленные и принятые байты.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "driver/spi_master.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы FreeRTOS. Пауза между обменами без них не соберётся. */
+#include "freertos/task.h" /* vTaskDelay: пауза, чтобы строки лога не слипались. */
+#include "driver/gpio.h" /* Номера выводов такта, MOSI, MISO и CS. */
+#include "driver/spi_master.h" /* Мастер SPI: поднять шину, добавить устройство, обменять буферы. */
+#include "esp_log.h" /* В монитор уходят отправленные и принятые байты. */
 
-#define PIN_SCLK GPIO_NUM_6
-#define PIN_MOSI GPIO_NUM_7
-#define PIN_MISO GPIO_NUM_2
-#define PIN_CS GPIO_NUM_10
-#define CLOCK_HZ 1000000
+#define PIN_SCLK GPIO_NUM_6 /* Вывод такта. Им всегда щёлкает мастер. */
+#define PIN_MOSI GPIO_NUM_7 /* Данные из чипа в устройство. Для петли его замыкают на MISO. */
+#define PIN_MISO GPIO_NUM_2 /* Данные из устройства в чип. В петле сюда вернётся то, что ушло на MOSI. */
+#define PIN_CS GPIO_NUM_10 /* Выбор устройства. На время передачи драйвер сам прижмёт его к нулю. */
+#define CLOCK_HZ 1000000 /* 1 МГц. Для проверки перемычкой большая скорость не нужна. */
 
-static const char *TAG = "spi";
+static const char *TAG = "spi"; /* Метка строк этого примера в мониторе. */
 
-static spi_device_handle_t s_device;
+static spi_device_handle_t s_device; /* Ручка устройства на SPI2. Через неё уходит каждая передача. */
 
-static void spi_setup(void)
+static void spi_setup(void) /* Включает SPI2 и регистрирует одно устройство на выводах выше. */
 {
-    spi_bus_config_t bus = {
+    spi_bus_config_t bus = { /* Какие выводы отдать шине. В контроллер это запишет вызов ниже. */
         .mosi_io_num = PIN_MOSI, /* Выход мастера, вход устройства. */
         .miso_io_num = PIN_MISO, /* Вход мастера, выход устройства. */
         .sclk_io_num = PIN_SCLK, /* Такт. Его всегда выдаёт мастер. */
         /* Линии quad-SPI нужны только флешкам. Обычному устройству их нет. */
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+        .quadwp_io_num = -1, /* Линия quad-SPI не нужна. Минус один значит «вывод не занимать». */
+        .quadhd_io_num = -1, /* Вторая линия quad-SPI обычному устройству тоже не нужна. */
         .max_transfer_sz = 32, /* Верхняя граница одной передачи в байтах. Нам хватает четырёх. */
     };
     /*
      * SPI_DMA_DISABLED: четыре байта процессор перенесёт сам.
      * DMA (SPI_DMA_CH_AUTO) имеет смысл для длинных буферов, например кадра дисплея.
      */
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED));
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED)); /* Включает SPI2 без DMA: четыре байта скопирует сам процессор. */
 
-    spi_device_interface_config_t device = {
+    spi_device_interface_config_t device = { /* Скорость, режим и вывод CS одной микросхемы. */
         .clock_speed_hz = CLOCK_HZ, /* 1 МГц. Для учебной микросхемы это спокойная скорость. */
         /* Режим 0: такт в покое низкий, данные фиксируются по переднему фронту. */
-        .mode = 0,
+        .mode = 0, /* Режим 0. Его ждут большинство простых микросхем. */
         .spics_io_num = PIN_CS, /* Драйвер сам опустит CS на время передачи и поднимет после. */
         .queue_size = 1, /* Сколько транзакций можно поставить в очередь драйвера. Нам хватает одной. */
     };
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &device, &s_device));
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &device, &s_device)); /* Вешает устройство на SPI2 и сохраняет ручку. */
 }
 
-static void dump_bytes(const char *title, const uint8_t *data, size_t length)
+static void dump_bytes(const char *title, const uint8_t *data, size_t length) /* Печатает байты одной строкой hex, чтобы их было легко сравнить. */
 {
-    char line[3 * 8 + 1];
-    size_t pos = 0;
-    for (size_t i = 0; i < length && pos + 4 < sizeof(line); i++) {
-        pos += (size_t)snprintf(line + pos, sizeof(line) - pos, "%02X ", data[i]);
+    char line[3 * 8 + 1]; /* Место под восемь групп «XX » и нуль в конце. Четырём байтам хватает. */
+    size_t pos = 0; /* С какой позиции дописывать следующий байт. */
+    for (size_t i = 0; i < length && pos + 4 < sizeof(line); i++) { /* Пока есть байты и в строке ещё влезает «XX ». */
+        pos += (size_t)snprintf(line + pos, sizeof(line) - pos, "%02X ", data[i]); /* Дописывает байт двумя hex-цифрами и пробелом. */
     }
-    ESP_LOGI(TAG, "%s %s", title, line);
+    ESP_LOGI(TAG, "%s %s", title, line); /* Заголовок и собранная строка байтов уходят в монитор. */
 }
 
-static void exchange_once(void)
+static void exchange_once(void) /* Один обмен: байт уходит на MOSI и одновременно приходит с MISO. */
 {
-    const uint8_t tx[] = {0xA5, 0x5A, 0x10, 0x01};
-    uint8_t rx[sizeof(tx)];
-    memset(rx, 0, sizeof(rx));
+    const uint8_t tx[] = {0xA5, 0x5A, 0x10, 0x01}; /* Четыре байта наружу. В петле те же должны вернуться. */
+    uint8_t rx[sizeof(tx)]; /* Буфер приёма той же длины. SPI заполнит его во время передачи. */
+    memset(rx, 0, sizeof(rx)); /* Обнуляем приём, чтобы старый мусор не выглядел как ответ. */
 
-    spi_transaction_t transaction = {
+    spi_transaction_t transaction = { /* Длина в битах и оба буфера. CS на время обмена драйвер дёрнет сам. */
         /*
          * Длина — в битах, не в байтах. Это частая ошибка:
          * четыре байта — это 32 бита, а не 4.
          */
-        .length = sizeof(tx) * 8,
-        .tx_buffer = tx,
-        .rx_buffer = rx,
+        .length = sizeof(tx) * 8, /* Длина в битах: четыре байта — это 32, не 4. */
+        .tx_buffer = tx, /* Откуда мастер берёт биты для MOSI. */
+        .rx_buffer = rx, /* Куда складываются биты, пришедшие с MISO. */
     };
-    ESP_ERROR_CHECK(spi_device_transmit(s_device, &transaction));
+    ESP_ERROR_CHECK(spi_device_transmit(s_device, &transaction)); /* Ждёт конца обмена. Пока он идёт, CS прижат к нулю. */
 
-    dump_bytes("отправлено", tx, sizeof(tx));
-    dump_bytes("принято   ", rx, sizeof(rx));
-    if (memcmp(tx, rx, sizeof(tx)) == 0) {
-        ESP_LOGI(TAG, "петля MOSI-MISO замкнута: принятое совпало с отправленным");
-    } else {
-        ESP_LOGI(TAG, "совпадения нет. Для петли соедините GPIO%d и GPIO%d",
-                 PIN_MOSI, PIN_MISO);
+    dump_bytes("отправлено", tx, sizeof(tx)); /* Показать в логе, что ушло на MOSI. */
+    dump_bytes("принято   ", rx, sizeof(rx)); /* И что в тот же момент пришло с MISO. */
+    if (memcmp(tx, rx, sizeof(tx)) == 0) { /* Ноль значит, что буферы совпали байт в байт. */
+        ESP_LOGI(TAG, "петля MOSI-MISO замкнута: принятое совпало с отправленным"); /* Перемычка на месте, шина живая. */
+    } else { /* Байты разные: петли нет или на выводах отвечает другая микросхема. */
+        ESP_LOGI(TAG, "совпадения нет. Для петли соедините GPIO%d и GPIO%d", /* Подсказка, что замкнуть для проверки без микросхемы. */
+                 PIN_MOSI, PIN_MISO); /* Подставляет номера MOSI и MISO, GPIO7 и GPIO2. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа: готовит SPI2 и повторяет обмен. */
 {
-    ESP_LOGI(TAG, "SPI2  %d Гц  mode 0", CLOCK_HZ);
-    ESP_LOGI(TAG, "SCLK GPIO%d  MOSI GPIO%d  MISO GPIO%d  CS GPIO%d",
-             PIN_SCLK, PIN_MOSI, PIN_MISO, PIN_CS);
-    spi_setup();
+    ESP_LOGI(TAG, "SPI2  %d Гц  mode 0", CLOCK_HZ); /* В монитор: шина SPI2, частота и режим. */
+    ESP_LOGI(TAG, "SCLK GPIO%d  MOSI GPIO%d  MISO GPIO%d  CS GPIO%d", /* Подписывает, какой вывод за какую линию отвечает. */
+             PIN_SCLK, PIN_MOSI, PIN_MISO, PIN_CS); /* Подставляет GPIO6, GPIO7, GPIO2 и GPIO10. */
+    spi_setup(); /* Шина и устройство готовы к первой передаче. */
 
-    while (true) {
-        exchange_once();
-        vTaskDelay(pdMS_TO_TICKS(2000));
+    while (true) { /* Обмен повторяется: перемычку можно воткнуть уже после старта. */
+        exchange_once(); /* Одна передача и сравнение буферов. */
+        vTaskDelay(pdMS_TO_TICKS(2000)); /* Две секунды между обменами, чтобы лог можно было читать. */
     }
 }

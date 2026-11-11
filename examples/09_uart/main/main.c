@@ -31,23 +31,23 @@
  * driver/gpio.h — номера GPIO20 и GPIO21. uart.h сам эти константы не объявляет.
  * esp_log.h — журнал в USB-монитор. Это другая линия, не тот UART, что в примере.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/uart.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы FreeRTOS. pdMS_TO_TICKS объявлен на их основе. */
+#include "freertos/task.h" /* Перевод миллисекунд в тики: столько ждать байт при чтении. */
+#include "driver/uart.h" /* Порт: скорость, буфер, приём и передача байтов. */
+#include "driver/gpio.h" /* Номера GPIO20 и GPIO21. В uart.h этих констант нет. */
+#include "esp_log.h" /* Журнал в USB-монитор. Это не тот UART, что принимает текст. */
 
-#define UART_PORT UART_NUM_1
-#define UART_TX GPIO_NUM_21
-#define UART_RX GPIO_NUM_20
-#define UART_BAUD 115200
-#define RX_BUFFER_BYTES 1024
+#define UART_PORT UART_NUM_1 /* Второй порт. Его выводы свободны от USB-монитора. */
+#define UART_TX GPIO_NUM_21 /* С этого вывода чип передаёт байты собеседнику. */
+#define UART_RX GPIO_NUM_20 /* На этот вывод собеседник передаёт байты чипу. */
+#define UART_BAUD 115200 /* 115200 бит/с. Вторая сторона обязана выбрать ту же скорость. */
+#define RX_BUFFER_BYTES 1024 /* Приёмный буфер драйвера. Ноль здесь означал бы, что читать нечего. */
 
-static const char *TAG = "uart";
+static const char *TAG = "uart"; /* Метка строк этого примера в USB-мониторе. */
 
-static void uart_setup(void)
+static void uart_setup(void) /* Включает UART1, записывает 115200 8N1 и привязывает выводы. */
 {
-    const uart_config_t config = {
+    const uart_config_t config = { /* Формат кадра. В порт это запишет uart_param_config ниже. */
         .baud_rate = UART_BAUD,             /* Скорость. Собеседник обязан выбрать ту же. */
         .data_bits = UART_DATA_8_BITS,      /* Восемь бит полезных данных в кадре. */
         .parity = UART_PARITY_DISABLE,      /* Бита чётности нет, отсюда буква N в «8N1». */
@@ -63,42 +63,42 @@ static void uart_setup(void)
      * сразу в периферию и возвращается, когда они приняты оборудованием.
      * Очередь событий UART нам не нужна, поэтому её длина 0 и указатель NULL.
      */
-    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, RX_BUFFER_BYTES, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_driver_install(UART_PORT, RX_BUFFER_BYTES, 0, 0, NULL, 0)); /* Включает драйвер и буфер приёма на 1024 байта. */
     /* Скорость и формат кадра. До этого вызова порт ещё не знает про 115200 8N1. */
-    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &config));
+    ESP_ERROR_CHECK(uart_param_config(UART_PORT, &config)); /* Записывает 115200 8N1 в порт. */
     /*
      * Последние два аргумента — RTS и CTS. UART_PIN_NO_CHANGE оставляет их
      * неподключёнными: аппаратного управления потоком в примере нет.
      */
-    ESP_ERROR_CHECK(uart_set_pin(UART_PORT, UART_TX, UART_RX,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+    ESP_ERROR_CHECK(uart_set_pin(UART_PORT, UART_TX, UART_RX, /* TX на GPIO21, RX на GPIO20. Иначе байты не выйдут наружу. */
+                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE)); /* RTS и CTS не подключаем: управлять потоком нечем. */
 }
 
-void app_main(void)
+void app_main(void) /* Старт: готовит порт, шлёт приглашение и возвращает принятый текст. */
 {
-    ESP_LOGI(TAG, "UART%d  %d 8N1, TX=GPIO%d RX=GPIO%d",
-             UART_PORT, UART_BAUD, UART_TX, UART_RX);
-    ESP_LOGI(TAG, "для петли соедините GPIO%d и GPIO%d", UART_TX, UART_RX);
-    uart_setup();
+    ESP_LOGI(TAG, "UART%d  %d 8N1, TX=GPIO%d RX=GPIO%d", /* В монитор: номер порта, скорость и выводы. */
+             UART_PORT, UART_BAUD, UART_TX, UART_RX); /* Подставляет UART1, 115200, GPIO21 и GPIO20. */
+    ESP_LOGI(TAG, "для петли соедините GPIO%d и GPIO%d", UART_TX, UART_RX); /* Подсказка: перемычка TX с RX заставит чип услышать сам себя. */
+    uart_setup(); /* Порт готов и передавать, и принимать. */
 
-    const char *hello = "\r\nESP32-C3 UART. Наберите текст, он вернётся обратно.\r\n";
+    const char *hello = "\r\nESP32-C3 UART. Наберите текст, он вернётся обратно.\r\n"; /* Приглашение уйдёт в UART, не в USB-лог. */
     /* uart_write_bytes принимает число байт, а не «строку до нуля», поэтому длина отдельно. */
-    uart_write_bytes(UART_PORT, hello, strlen(hello));
+    uart_write_bytes(UART_PORT, hello, strlen(hello)); /* Отправляет приглашение. Длину считаем сами: функция конец строки не ищет. */
 
-    uint8_t buffer[128];
-    while (true) {
+    uint8_t buffer[128]; /* Принятые байты. Последний оставим под нулевой конец строки. */
+    while (true) { /* Текст могут прислать в любой момент, поэтому ждём без конца. */
         /*
          * uart_read_bytes ждёт не дольше указанного времени.
          * Если за 200 мс ничего не пришло, вернётся 0 — это не ошибка.
          */
-        int received = uart_read_bytes(UART_PORT, buffer, sizeof(buffer) - 1,
-                                       pdMS_TO_TICKS(200));
-        if (received > 0) {
-            buffer[received] = 0;
-            ESP_LOGI(TAG, "принято %d байт: %s", received, (char *)buffer);
-            const char *prefix = "echo: ";
-            uart_write_bytes(UART_PORT, prefix, strlen(prefix));
-            uart_write_bytes(UART_PORT, buffer, received);
+        int received = uart_read_bytes(UART_PORT, buffer, sizeof(buffer) - 1, /* Не больше 127 байт: один байт нужен под конец строки. */
+                                       pdMS_TO_TICKS(200)); /* Ждём до 200 мс. Тишина даёт 0, и это не сбой. */
+        if (received > 0) { /* Байты пришли. Ноль значил бы, что за 200 мс линия молчала. */
+            buffer[received] = 0; /* Конец строки, чтобы %s в логе не уехал за буфер. */
+            ESP_LOGI(TAG, "принято %d байт: %s", received, (char *)buffer); /* В мониторе длина и текст. Сам UART этого не показывает. */
+            const char *prefix = "echo: "; /* Приставка, чтобы в терминале ответ отличался от набранного. */
+            uart_write_bytes(UART_PORT, prefix, strlen(prefix)); /* Сначала в порт уходит слово echo. */
+            uart_write_bytes(UART_PORT, buffer, received); /* Затем ровно принятые байты, без добавленного нуля. */
         }
     }
 }

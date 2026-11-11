@@ -26,32 +26,32 @@
  *   изменение скважности без участия цикла программы.
  * esp_log.h — сообщения о том, в какую сторону сейчас меняется яркость.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "driver/ledc.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы FreeRTOS. Заголовок task.h без него не соберётся. */
+#include "freertos/task.h" /* vTaskDelay: подождать, пока яркость меняет сам LEDC. */
+#include "driver/gpio.h" /* Номер GPIO8. Тип вывода объявлен здесь, переключает его LEDC. */
+#include "driver/ledc.h" /* Аппаратный ШИМ: частота, скважность и плавное изменение яркости. */
+#include "esp_log.h" /* Строки в монитор о том, яркость сейчас растёт или падает. */
 
-#define LED_GPIO GPIO_NUM_8
+#define LED_GPIO GPIO_NUM_8 /* Вывод светодиода. Канал LEDC будет переключать именно его. */
 /*
  * 0 — светодиод ярче, когда на выводе больше времени низкий уровень
  *     (типичная плата, где светодиод подтянут к 3.3 В).
  * 1 — светодиод ярче при большей доле высокого уровня.
  */
-#define LED_ON_LEVEL 0
+#define LED_ON_LEVEL 0 /* 0: диод ярче, когда вывод дольше сидит в нуле. Так на типичной плате. */
 
-#define LEDC_MODE LEDC_LOW_SPEED_MODE
-#define LEDC_TIMER LEDC_TIMER_0
-#define LEDC_CHANNEL LEDC_CHANNEL_0
-#define LEDC_DUTY_BITS LEDC_TIMER_13_BIT
-#define LEDC_FREQ_HZ 5000
+#define LEDC_MODE LEDC_LOW_SPEED_MODE /* На ESP32-C3 у LEDC есть только этот, низкоскоростной режим. */
+#define LEDC_TIMER LEDC_TIMER_0 /* Таймер 0 задаёт частоту. Сам к выводу он не привязан. */
+#define LEDC_CHANNEL LEDC_CHANNEL_0 /* Канал 0 хранит скважность и номер вывода. */
+#define LEDC_DUTY_BITS LEDC_TIMER_13_BIT /* 13 бит: скважность — число от 0 до 8191, а не процент. */
+#define LEDC_FREQ_HZ 5000 /* 5 кГц. Вывод щёлкает часто, глаз видит ровную яркость. */
 
-static const char *TAG = "pwm";
+static const char *TAG = "pwm"; /* Метка в скобках перед каждой строкой лога этого примера. */
 
 /* Максимальное значение duty при выбранном разрешении: 2^13 - 1 = 8191. */
-static uint32_t max_duty(void)
+static uint32_t max_duty(void) /* Верх шкалы duty. Яркость 100% дальше считается от этого числа. */
 {
-    return (1U << LEDC_DUTY_BITS) - 1U;
+    return (1U << LEDC_DUTY_BITS) - 1U; /* Сдвиг даёт 8192, минус один — максимальный код 8191. */
 }
 
 /*
@@ -59,25 +59,25 @@ static uint32_t max_duty(void)
  * Яркость 100 всегда означает «светит сильнее всего», даже если для этого
  * аппаратный duty должен быть нулём.
  */
-static uint32_t duty_for_brightness(int percent)
+static uint32_t duty_for_brightness(int percent) /* Проценты 0…100 в код LEDC. 100 всегда значит «ярче всего». */
 {
-    if (percent < 0) {
-        percent = 0;
+    if (percent < 0) { /* Ниже нуля яркости не бывает, иначе формула уйдёт в огромное число. */
+        percent = 0; /* Отрицательное просим считать погашенным светодиодом. */
     }
-    if (percent > 100) {
-        percent = 100;
+    if (percent > 100) { /* Выше 100% шкала duty не растягивается. */
+        percent = 100; /* Потолок — полная яркость, чтобы не переполнить код. */
     }
-    uint32_t full = max_duty();
-    uint32_t duty = (full * (uint32_t)percent) / 100U;
-    if (LED_ON_LEVEL == 0) {
-        duty = full - duty;
+    uint32_t full = max_duty(); /* 8191. Это «сто процентов» для пропорции ниже. */
+    uint32_t duty = (full * (uint32_t)percent) / 100U; /* Доля шкалы: 50 даст около половины 8191. */
+    if (LED_ON_LEVEL == 0) { /* Диод ярче от низкого уровня, поэтому шкалу переворачиваем. */
+        duty = full - duty; /* Чем ярче просим, тем меньше аппаратный duty. */
     }
-    return duty;
+    return duty; /* Это число канал LEDC примет как скважность. */
 }
 
-static void ledc_setup(void)
+static void ledc_setup(void) /* Один раз готовит таймер, канал и плавное изменение яркости. */
 {
-    ledc_timer_config_t timer = {
+    ledc_timer_config_t timer = { /* Частота и разрядность. В железо это попадёт вызовом ниже. */
         .speed_mode = LEDC_MODE,          /* На C3 доступен только низкоскоростной режим. */
         .duty_resolution = LEDC_DUTY_BITS, /* 13 бит: яркость задаётся числом 0…8191. */
         .timer_num = LEDC_TIMER,          /* Какой из аппаратных таймеров LEDC брать. */
@@ -85,48 +85,48 @@ static void ledc_setup(void)
         .clk_cfg = LEDC_AUTO_CLK,         /* Источник такта драйвер подберёт сам. */
     };
     /* Таймер задаёт частоту. К выводу он пока не привязан. */
-    ESP_ERROR_CHECK(ledc_timer_config(&timer));
+    ESP_ERROR_CHECK(ledc_timer_config(&timer)); /* Записывает частоту в таймер. Ошибка здесь остановит запуск. */
 
-    ledc_channel_config_t channel = {
+    ledc_channel_config_t channel = { /* Вывод и стартовая скважность. Канал включится вызовом ниже. */
         .gpio_num = LED_GPIO,  /* Какой вывод переключать. */
-        .speed_mode = LEDC_MODE,
+        .speed_mode = LEDC_MODE, /* Тот же режим, что у таймера, иначе канал к его частоте не привяжется. */
         .channel = LEDC_CHANNEL, /* Канал хранит скважность и номер вывода. */
         .timer_sel = LEDC_TIMER, /* Частоту канал берёт у таймера, настроенного выше. */
         .duty = duty_for_brightness(0), /* Стартуем с погашенного светодиода. */
         .hpoint = 0, /* Момент внутри периода, когда начинается импульс. 0 — с начала. */
     };
-    ESP_ERROR_CHECK(ledc_channel_config(&channel));
+    ESP_ERROR_CHECK(ledc_channel_config(&channel)); /* Привязывает GPIO8 к каналу и включает ШИМ. */
 
     /*
      * fade_func_install ставит обработчик, который двигает duty.
      * Аргумент — флаги прерывания. 0 означает обычную установку.
      * Без этого вызова ledc_set_fade_with_time вернёт ошибку.
      */
-    ESP_ERROR_CHECK(ledc_fade_func_install(0));
+    ESP_ERROR_CHECK(ledc_fade_func_install(0)); /* Ставит обработчик плавного duty. Без него fade_to вернёт ошибку. */
 }
 
 /* Плавно прийти к яркости percent за time_ms миллисекунд. */
-static void fade_to(int percent, int time_ms)
+static void fade_to(int percent, int time_ms) /* Просит железо дойти до яркости percent за time_ms миллисекунд. */
 {
-    ESP_ERROR_CHECK(ledc_set_fade_with_time(
-        LEDC_MODE, LEDC_CHANNEL, duty_for_brightness(percent), time_ms));
+    ESP_ERROR_CHECK(ledc_set_fade_with_time( /* Запоминает цель и время. Сам переход ещё не начался. */
+        LEDC_MODE, LEDC_CHANNEL, duty_for_brightness(percent), time_ms)); /* Режим, канал, целевой duty и длительность в мс. */
     /* LEDC_FADE_NO_WAIT: функция возвращается сразу, яркость меняет периферия. */
-    ESP_ERROR_CHECK(ledc_fade_start(LEDC_MODE, LEDC_CHANNEL, LEDC_FADE_NO_WAIT));
+    ESP_ERROR_CHECK(ledc_fade_start(LEDC_MODE, LEDC_CHANNEL, LEDC_FADE_NO_WAIT)); /* Запускает переход и сразу возвращается: шаги делает LEDC. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. ESP-IDF вызывает её, когда FreeRTOS уже запущен. */
 {
-    ESP_LOGI(TAG, "ШИМ %d Гц на GPIO%d, разрешение %d бит",
-             LEDC_FREQ_HZ, LED_GPIO, LEDC_DUTY_BITS);
-    ledc_setup();
+    ESP_LOGI(TAG, "ШИМ %d Гц на GPIO%d, разрешение %d бит", /* В монитор: частота, вывод и разрядность ШИМ. */
+             LEDC_FREQ_HZ, LED_GPIO, LEDC_DUTY_BITS); /* Подставляет 5000 Гц, GPIO8 и 13 бит. */
+    ledc_setup(); /* Таймер, канал и плавное изменение готовы до первого цикла. */
 
-    while (true) {
-        ESP_LOGI(TAG, "яркость 0 -> 100");
-        fade_to(100, 1500);
-        vTaskDelay(pdMS_TO_TICKS(1600));
+    while (true) { /* Без конца: разгореться, погаснуть и повторить. */
+        ESP_LOGI(TAG, "яркость 0 -> 100"); /* Сообщаем, что светодиод начинает разгораться. */
+        fade_to(100, 1500); /* За 1.5 с дойти до полной яркости. Процессор этим шагом не занят. */
+        vTaskDelay(pdMS_TO_TICKS(1600)); /* Спим 1.6 с, чуть дольше перехода, чтобы яркость успела дойти. */
 
-        ESP_LOGI(TAG, "яркость 100 -> 0");
-        fade_to(0, 1500);
-        vTaskDelay(pdMS_TO_TICKS(1600));
+        ESP_LOGI(TAG, "яркость 100 -> 0"); /* Сообщаем, что светодиод начинает гаснуть. */
+        fade_to(0, 1500); /* За 1.5 с вернуться к нулевой яркости. */
+        vTaskDelay(pdMS_TO_TICKS(1600)); /* Снова ждём конец перехода, процессор в это время свободен. */
     }
 }
