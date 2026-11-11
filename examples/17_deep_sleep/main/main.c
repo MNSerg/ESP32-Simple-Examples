@@ -38,51 +38,51 @@
  * esp_sleep.h — таймер пробуждения, GPIO пробуждения и esp_deep_sleep_start.
  *   Из этой функции управление не возвращается.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_sleep.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* vTaskDelay: пауза, чтобы последняя строка лога успела уйти в USB. */
+#include "esp_log.h" /* ESP_LOGI печатает причину пробуждения. После глубокого сна программа начинается заново. */
+#include "esp_sleep.h" /* Таймер, пробуждение по GPIO и esp_deep_sleep_start. Из этой функции управление не возвращается. */
 
 /* GPIO4 входит в RTC-домен. GPIO9, кнопка из проекта с дисплеем, — нет. */
-#define WAKE_GPIO GPIO_NUM_4
-#define SLEEP_SECONDS 20
+#define WAKE_GPIO GPIO_NUM_4 /* Кнопка на GPIO4. Глубокий сон будят только GPIO0…GPIO5. */
+#define SLEEP_SECONDS 20 /* Через сколько секунд таймер разбудит чип, даже если кнопку не нажали. */
 
-static const char *TAG = "deep_sleep";
+static const char *TAG = "deep_sleep"; /* Подпись строк монитора: в скобках будет «deep_sleep». */
 
 /* Значение лежит в RTC slow memory и сохраняется на время глубокого сна. */
-RTC_DATA_ATTR static uint32_t s_wakeups;
+RTC_DATA_ATTR static uint32_t s_wakeups; /* Счётчик пробуждений в RTC-памяти. Обычная переменная после глубокого сна обнулилась бы. */
 
-static const char *cause_text(esp_sleep_wakeup_cause_t cause)
+static const char *cause_text(esp_sleep_wakeup_cause_t cause) /* Переводит код причины в короткую фразу для монитора. */
 {
-    switch (cause) {
-    case ESP_SLEEP_WAKEUP_TIMER:
-        return "таймер";
-    case ESP_SLEEP_WAKEUP_GPIO:
-        return "GPIO";
-    case ESP_SLEEP_WAKEUP_UNDEFINED:
-        return "включение или сброс, это не пробуждение из сна";
-    default:
-        return "другой источник";
+    switch (cause) { /* Смотрим, чем чип проснулся в эту загрузку. */
+    case ESP_SLEEP_WAKEUP_TIMER: /* Сработал таймер, который включили перед сном. */
+        return "таймер"; /* Эту фразу подставит ESP_LOGI. */
+    case ESP_SLEEP_WAKEUP_GPIO: /* Низкий уровень на GPIO4. */
+        return "GPIO"; /* Значит, кнопку замкнули на землю. */
+    case ESP_SLEEP_WAKEUP_UNDEFINED: /* Причины сна нет: это включение питания или сброс. */
+        return "включение или сброс, это не пробуждение из сна"; /* Так бывает при первом старте, пока чип ещё не засыпал. */
+    default: /* Код есть, но этот пример его специально не разбирает. */
+        return "другой источник"; /* Запасная фраза, чтобы в логе не было пустого места. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. После глубокого сна ESP-IDF вызывает её снова, как при новой загрузке. */
 {
     /*
      * Плюс один к числу, которое лежит в RTC-памяти. Обычная глобальная
      * переменная здесь обнулилась бы: загрузчик заново инициализирует память.
      */
-    s_wakeups++;
+    s_wakeups++; /* Плюс один к счётчику в RTC-памяти. Он переживёт сон, обычная глобальная — нет. */
     /* Причина относится к пробуждению, которое только что запустило эту загрузку. */
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    ESP_LOGI(TAG, "загрузка %" PRIu32 ", причина: %s (%d)",
-             s_wakeups, cause_text(cause), (int)cause);
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause(); /* Узнать, что разбудило чип. Вызов имеет смысл только в начале app_main. */
+    ESP_LOGI(TAG, "загрузка %" PRIu32 ", причина: %s (%d)", /* Печатаем номер загрузки и причину. PRIu32 нужен для uint32_t. */
+             s_wakeups, cause_text(cause), (int)cause); /* Число пробуждений, русская фраза и сырой код причины. */
 
     /*
      * Таймер глубокого сна считает микросекунды.
      * 20 секунд * 1 000 000. Суффикс ULL не даёт переполнения 32-битного int.
      */
-    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL));
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL)); /* Разрешить пробуждение через 20 секунд. Таймер считает микросекунды, ULL не даёт переполнения. */
 
     /*
      * Низкий уровень на GPIO4 тоже будит чип.
@@ -92,17 +92,17 @@ void app_main(void)
      * Для пробуждения низким уровнем внешняя подтяжка к 3.3 В надёжнее
      * внутренней. Кнопку между GPIO4 и GND как раз так и подключают.
      */
-    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(
-        1ULL << WAKE_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW));
+    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown( /* Включить пробуждение по GPIO в глубоком сне. Не ESP_OK остановит программу. */
+        1ULL << WAKE_GPIO, ESP_GPIO_WAKEUP_GPIO_LOW)); /* Бит GPIO4 и низкий уровень: кнопка между выводом и землёй. */
 
-    ESP_LOGI(TAG, "ухожу в глубокий сон на %d с. Либо замкните GPIO%d на GND",
-             SLEEP_SECONDS, WAKE_GPIO);
+    ESP_LOGI(TAG, "ухожу в глубокий сон на %d с. Либо замкните GPIO%d на GND", /* Предупредить в мониторе, что дальше процессор выключится. */
+             SLEEP_SECONDS, WAKE_GPIO); /* Подставить секунды и номер вывода из констант выше. */
     /* Дать логу доехать до USB, иначе последнюю строку не увидите. */
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(200)); /* 200 мс паузы: последняя строка успевает уйти в USB до выключения процессора. */
 
     /*
      * Отсюда управление не возвращается. Следующая выполненная строка
      * вашей программы — снова начало app_main после перезагрузки.
      */
-    esp_deep_sleep_start();
+    esp_deep_sleep_start(); /* Уйти в глубокий сон. Управление отсюда не вернётся, дальше снова начало app_main. */
 }

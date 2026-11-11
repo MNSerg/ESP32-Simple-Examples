@@ -25,156 +25,156 @@
  * u8g2.h — рисование: очистить буфер, выбрать шрифт, написать строку, вывести буфер.
  * u8g2_esp32_hal.h — связать u8g2 с I2C ESP32: выводы, частота и функции обмена.
  */
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "esp_system.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "u8g2.h"
-#include "u8g2_esp32_hal.h"
+#include "driver/gpio.h" /* Кнопка GPIO9. Шина дисплея этим заголовком не поднимается. */
+#include "esp_log.h" /* Дублировать действие меню в монитор, если на экран не смотрят. */
+#include "esp_system.h" /* Свободная куча и минимум за время работы. Их показывает пункт «Память». */
+#include "esp_timer.h" /* esp_timer_get_time меряет, сколько держали кнопку, в микросекундах. */
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* Короткие паузы антидребезга. Меню живёт в задаче main. */
+#include "u8g2.h" /* Рисование: буфер, шрифт, строка UTF-8 и отправка кадра. */
+#include "u8g2_esp32_hal.h" /* Связать u8g2 с I2C ESP32: выводы, частота и функции обмена. */
 
-static const char *TAG = "menu";
+static const char *TAG = "menu"; /* Подпись строк монитора. */
 
-#define OLED_ADDR 0x3C
-#define BUTTON_GPIO GPIO_NUM_9
-#define LONG_PRESS_US 500000
-#define VISIBLE_ROWS 3
-#define MENU_DEPTH 4
+#define OLED_ADDR 0x3C /* 7-битный адрес OLED. u8g2 ждёт его сдвинутым на бит влево. */
+#define BUTTON_GPIO GPIO_NUM_9 /* Единственная кнопка. Короткое нажатие листает, длинное выбирает. */
+#define LONG_PRESS_US 500000 /* Порог длинного нажатия: 500 мс, в микросекундах. */
+#define VISIBLE_ROWS 3 /* Сколько строк меню помещается под заголовком на стекле 72 на 40. */
+#define MENU_DEPTH 4 /* Сколько вложенных экранов можно открыть. Глубже стек не пускаем. */
 
-typedef enum {
-    BTN_NONE = 0,
-    BTN_SHORT,
-    BTN_LONG,
-} btn_event_t;
+typedef enum { /* События кнопки. Ноль — ничего не нажато, чтобы мусор не стал событием. */
+    BTN_NONE = 0, /* Кнопку не трогали или дребезг отсеяли. */
+    BTN_SHORT, /* Нажали и отпустили быстрее, чем за 500 мс. Это переход к следующему пункту. */
+    BTN_LONG, /* Держали не короче порога. Это вход в пункт или его выполнение. */
+} btn_event_t; /* Имя типа. Дальше button_poll возвращает одно из этих трёх значений. */
 
-typedef struct menu_item menu_item_t;
+typedef struct menu_item menu_item_t; /* Предварительное имя структуры: поле children ссылается на такой же тип. */
 
-typedef enum {
-    ITEM_SUBMENU,
-    ITEM_ACTION,
-    ITEM_BACK,
-} menu_kind_t;
+typedef enum { /* Три вида пункта. Цикл меню смотрит на kind, а не на цепочку if по тексту. */
+    ITEM_SUBMENU, /* Открыть другой список. Сами пункты лежат в children. */
+    ITEM_ACTION, /* Вызвать функцию action. Подменю у такого пункта нет. */
+    ITEM_BACK, /* Закрыть текущий экран и вернуться на предыдущий. */
+} menu_kind_t; /* Имя типа для поля kind. */
 
-struct menu_item {
-    const char *title;
-    menu_kind_t kind;
-    const menu_item_t *children;
-    int child_count;
-    void (*action)(u8g2_t *u8g2);
+struct menu_item { /* Один пункт таблицы. Добавить экран — дописать такую строку, а не новый if. */
+    const char *title; /* Текст на стекле. Кириллицу потом рисует DrawUTF8. */
+    menu_kind_t kind; /* Подменю, действие или назад. От этого зависит, что сделает длинное нажатие. */
+    const menu_item_t *children; /* Список внутри подменю. У действия и у пункта «назад» здесь NULL. */
+    int child_count; /* Сколько элементов в children. Для листа ноль. */
+    void (*action)(u8g2_t *u8g2); /* Функция, которую вызовут при выборе. У подменю и у «назад» её нет. */
 };
 
-typedef struct {
-    const char *title;
-    const menu_item_t *items;
-    int count;
-    int cursor;
-} menu_frame_t;
+typedef struct { /* Один открытый экран меню: заголовок, пункты и какой из них выбран. */
+    const char *title; /* Строка над списком, например «Меню» или имя подменю. */
+    const menu_item_t *items; /* Указатель на таблицу пунктов этого экрана. */
+    int count; /* Длина таблицы. Курсор не должен выходить за неё. */
+    int cursor; /* Номер выбранного пункта, с нуля. Короткое нажатие его увеличивает. */
+} menu_frame_t; /* Имя типа кадра. Стек таких кадров помнит, откуда пришли. */
 
-static u8g2_t s_u8g2;
-static int s_contrast = 128;
+static u8g2_t s_u8g2; /* Объект дисплея u8g2. В нём буфер кадра и состояние контроллера. */
+static int s_contrast = 128; /* Текущая яркость, от 0 до 255. Середина шкалы — стартовое значение. */
 
-static void show_lines(u8g2_t *u8g2, const char *a, const char *b, const char *c)
+static void show_lines(u8g2_t *u8g2, const char *a, const char *b, const char *c) /* Показать три строки на 1,2 секунды. Так действие видно до возврата в меню. */
 {
     /* Рисунок идёт в буфер в памяти. Пока SendBuffer не вызван, стекло не меняется. */
-    u8g2_ClearBuffer(u8g2);
+    u8g2_ClearBuffer(u8g2); /* Стереть кадр в памяти. Пока нет SendBuffer, стекло ещё показывает старое. */
     /* Координата y — базовая линия букв, не верх строки. 10, 22 и 34 умещают три строки. */
-    u8g2_DrawUTF8(u8g2, 0, 10, a);
-    u8g2_DrawUTF8(u8g2, 0, 22, b);
-    u8g2_DrawUTF8(u8g2, 0, 34, c);
+    u8g2_DrawUTF8(u8g2, 0, 10, a); /* Первая строка. Y — базовая линия букв, не верх строки. */
+    u8g2_DrawUTF8(u8g2, 0, 22, b); /* Вторая строка, на 12 пикселей ниже. */
+    u8g2_DrawUTF8(u8g2, 0, 34, c); /* Третья строка. Пустая строка просто ничего не нарисует. */
     /* Отправить весь буфер 72×40 на дисплей одним обменом по I2C. */
-    u8g2_SendBuffer(u8g2);
+    u8g2_SendBuffer(u8g2); /* Отправить весь буфер 72 на 40 на дисплей одним обменом по I2C. */
     /* Подержать текст на экране, иначе меню тут же нарисуется поверх. */
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(1200)); /* Подержать текст. Иначе меню сразу нарисуется поверх. */
 }
 
-static void contrast_apply(u8g2_t *u8g2, int value)
+static void contrast_apply(u8g2_t *u8g2, int value) /* Запомнить яркость и отправить её в контроллер OLED. */
 {
-    if (value < 0) {
-        value = 0;
+    if (value < 0) { /* Ниже нуля контраст не задают: команда контроллера принимает только байт. */
+        value = 0; /* Обрезать отрицательное значение до минимума. */
     }
-    if (value > 255) {
-        value = 255;
+    if (value > 255) { /* Выше 255 байт не влезет, картинка и так уже самая яркая. */
+        value = 255; /* Обрезать до максимума шкалы. */
     }
-    s_contrast = value;
+    s_contrast = value; /* Запомнить уже обрезанное значение. Следующий плюс или минус пойдёт от него. */
     /* 0 — картинка еле видна, 255 — максимальная яркость стекла. Команда уходит в контроллер OLED. */
-    u8g2_SetContrast(u8g2, (uint8_t)s_contrast);
+    u8g2_SetContrast(u8g2, (uint8_t)s_contrast); /* Команда контроллеру: 0 еле видно, 255 — максимальная яркость стекла. */
 }
 
-static void action_contrast_up(u8g2_t *u8g2)
+static void action_contrast_up(u8g2_t *u8g2) /* Пункт увеличения контраста. Шаг 32, чтобы сдвиг был заметен на маленьком экране. */
 {
-    contrast_apply(u8g2, s_contrast + 32);
-    char line[20];
-    snprintf(line, sizeof(line), "контраст %d", s_contrast);
-    ESP_LOGI(TAG, "%s", line);
-    show_lines(u8g2, "Экран", line, "");
+    contrast_apply(u8g2, s_contrast + 32); /* Прибавить 32 и сразу отправить в OLED. Обрезку до 255 делает contrast_apply. */
+    char line[20]; /* Буфер строки для стекла и для лога. */
+    snprintf(line, sizeof(line), "контраст %d", s_contrast); /* Собрать текст с числом. sizeof не даст snprintf вылезти за массив. */
+    ESP_LOGI(TAG, "%s", line); /* Та же строка в монитор: действие видно, даже если на экран не смотрят. */
+    show_lines(u8g2, "Экран", line, ""); /* Показать заголовок и новое значение. Третья строка пустая. */
 }
 
-static void action_contrast_down(u8g2_t *u8g2)
+static void action_contrast_down(u8g2_t *u8g2) /* Пункт уменьшения контраста. Тот же шаг вниз. */
 {
-    contrast_apply(u8g2, s_contrast - 32);
-    char line[20];
-    snprintf(line, sizeof(line), "контраст %d", s_contrast);
-    ESP_LOGI(TAG, "%s", line);
-    show_lines(u8g2, "Экран", line, "");
+    contrast_apply(u8g2, s_contrast - 32); /* Вычесть 32. Ниже нуля contrast_apply не отпустит. */
+    char line[20]; /* Буфер подписи. */
+    snprintf(line, sizeof(line), "контраст %d", s_contrast); /* Текст с уже новым значением. */
+    ESP_LOGI(TAG, "%s", line); /* Дубль в монитор. */
+    show_lines(u8g2, "Экран", line, ""); /* Показать на стекле. */
 }
 
-static void action_contrast_reset(u8g2_t *u8g2)
+static void action_contrast_reset(u8g2_t *u8g2) /* Вернуть середину шкалы, не шагая по 32. */
 {
-    contrast_apply(u8g2, 128);
-    ESP_LOGI(TAG, "контраст 128");
-    show_lines(u8g2, "Экран", "контраст 128", "");
+    contrast_apply(u8g2, 128); /* 128 — середина диапазона от 0 до 255. */
+    ESP_LOGI(TAG, "контраст 128"); /* В лог фиксированное значение, буфер для него не нужен. */
+    show_lines(u8g2, "Экран", "контраст 128", ""); /* Та же фраза на экране. */
 }
 
-static void action_heap(u8g2_t *u8g2)
+static void action_heap(u8g2_t *u8g2) /* Показать, сколько байт кучи свободно сейчас и каким был минимум. */
 {
-    char free_line[20];
-    char min_line[20];
+    char free_line[20]; /* Строка со свободным объёмом. */
+    char min_line[20]; /* Строка с минимумом за время работы. */
     /* Свободно сейчас и минимум с момента загрузки. Второе показывает, не было ли провала. */
-    snprintf(free_line, sizeof(free_line), "%" PRIu32, esp_get_free_heap_size());
-    snprintf(min_line, sizeof(min_line), "мин %" PRIu32, esp_get_minimum_free_heap_size());
-    ESP_LOGI(TAG, "heap %s, %s", free_line, min_line);
-    show_lines(u8g2, "Память, байт", free_line, min_line);
+    snprintf(free_line, sizeof(free_line), "%" PRIu32, esp_get_free_heap_size()); /* Свободно сейчас. PRIu32 печатает uint32_t без обрезки. */
+    snprintf(min_line, sizeof(min_line), "мин %" PRIu32, esp_get_minimum_free_heap_size()); /* Минимум с загрузки. Если он далеко от текущего, куча когда-то сильно проседала. */
+    ESP_LOGI(TAG, "heap %s, %s", free_line, min_line); /* Обе цифры в монитор. */
+    show_lines(u8g2, "Память, байт", free_line, min_line); /* Три строки на стекле: заголовок и два числа. */
 }
 
-static void action_about(u8g2_t *u8g2)
+static void action_about(u8g2_t *u8g2) /* Короткая справка, что это за плата и куда смотреть. */
 {
-    show_lines(u8g2, "ESP32-C3", "OLED 72x40", "кнопка GPIO9");
+    show_lines(u8g2, "ESP32-C3", "OLED 72x40", "кнопка GPIO9"); /* Три готовые строки. Менять их с кнопки не нужно. */
 }
 
 /* Таблица читается снизу вверх: подменю ссылается на уже описанный массив. */
-static const menu_item_t SCREEN_ITEMS[] = {
-    {"Контраст +", ITEM_ACTION, NULL, 0, action_contrast_up},
-    {"Контраст -", ITEM_ACTION, NULL, 0, action_contrast_down},
-    {"Сброс", ITEM_ACTION, NULL, 0, action_contrast_reset},
-    {"Назад", ITEM_BACK, NULL, 0, NULL},
+static const menu_item_t SCREEN_ITEMS[] = { /* Подменю экрана. Массив объявлен до корня, потому что корень на него ссылается. */
+    {"Контраст +", ITEM_ACTION, NULL, 0, action_contrast_up}, /* Действие, детей нет, по длинному нажатию вызовется увеличение контраста. */
+    {"Контраст -", ITEM_ACTION, NULL, 0, action_contrast_down}, /* То же для уменьшения контраста. */
+    {"Сброс", ITEM_ACTION, NULL, 0, action_contrast_reset}, /* Вернуть яркость к 128. */
+    {"Назад", ITEM_BACK, NULL, 0, NULL}, /* ITEM_BACK снимет этот экран со стека. Функции у пункта «назад» нет. */
 };
 
-static const menu_item_t SYSTEM_ITEMS[] = {
-    {"Память", ITEM_ACTION, NULL, 0, action_heap},
-    {"О плате", ITEM_ACTION, NULL, 0, action_about},
-    {"Назад", ITEM_BACK, NULL, 0, NULL},
+static const menu_item_t SYSTEM_ITEMS[] = { /* Подменю системы, тоже объявлено до корня. */
+    {"Память", ITEM_ACTION, NULL, 0, action_heap}, /* Показать кучу. */
+    {"О плате", ITEM_ACTION, NULL, 0, action_about}, /* Показать строки о плате. */
+    {"Назад", ITEM_BACK, NULL, 0, NULL}, /* Вернуться в корень. */
 };
 
-static const menu_item_t ROOT_ITEMS[] = {
-    {"Экран", ITEM_SUBMENU, SCREEN_ITEMS, sizeof(SCREEN_ITEMS) / sizeof(SCREEN_ITEMS[0]), NULL},
-    {"Система", ITEM_SUBMENU, SYSTEM_ITEMS, sizeof(SYSTEM_ITEMS) / sizeof(SYSTEM_ITEMS[0]), NULL},
+static const menu_item_t ROOT_ITEMS[] = { /* Первый экран. Оба пункта открывают подменю, своих действий нет. */
+    {"Экран", ITEM_SUBMENU, SCREEN_ITEMS, sizeof(SCREEN_ITEMS) / sizeof(SCREEN_ITEMS[0]), NULL}, /* Детей считает sizeof, чтобы не править число руками при добавлении пункта. */
+    {"Система", ITEM_SUBMENU, SYSTEM_ITEMS, sizeof(SYSTEM_ITEMS) / sizeof(SYSTEM_ITEMS[0]), NULL}, /* Второе подменю. Длина считается так же. */
 };
 
-static bool display_init(void)
+static bool display_init(void) /* Поднять I2C и OLED. false — меню не запускаем, на стекле всё равно пусто. */
 {
-    u8g2_hal_config_t config = U8G2_HAL_CONFIG_DEFAULT;
-    config.i2c.sda = GPIO_NUM_5;
-    config.i2c.scl = GPIO_NUM_6;
-    config.i2c.port = I2C_NUM_0;
-    config.i2c.clk_speed = 400000;
+    u8g2_hal_config_t config = U8G2_HAL_CONFIG_DEFAULT; /* Типичные поля HAL. Дальше подменяем выводы и частоту под эту плату. */
+    config.i2c.sda = GPIO_NUM_5; /* SDA OLED. На этой плате это GPIO5. */
+    config.i2c.scl = GPIO_NUM_6; /* SCL, пара к SDA, GPIO6. */
+    config.i2c.port = I2C_NUM_0; /* Единственный контроллер I2C на ESP32-C3. */
+    config.i2c.clk_speed = 400000; /* 400 кГц. Для коротких проводов SSD1306 этой скорости хватает. */
 
     /*
      * HAL открывает I2C и запоминает выводы. Если шина занята другим драйвером
      * или вывод указан неверно, здесь вернётся ошибка, и дисплей не трогаем.
      */
-    if (u8g2_hal_init(&config) != ESP_OK) {
-        return false;
+    if (u8g2_hal_init(&config) != ESP_OK) { /* Открыть шину. Ошибка значит, что выводы заняты или указаны неверно. */
+        return false; /* Дисплей не трогаем: команд слать некуда. */
     }
 
     /*
@@ -182,42 +182,42 @@ static bool display_init(void)
      * Суффикс _f означает, что рисунок копится в памяти и уходит на экран целиком.
      * U8G2_R0 — без поворота. Две функции ниже — как u8g2 отдаёт байты в наш HAL.
      */
-    u8g2_Setup_ssd1306_i2c_72x40_er_f(
-        &s_u8g2,
-        U8G2_R0,
-        u8g2_esp32_hal_i2c_byte_cb,
-        u8g2_esp32_hal_gpio_and_delay_cb);
+    u8g2_Setup_ssd1306_i2c_72x40_er_f( /* Профиль SSD1306 72 на 40. Суффикс _f — полный буфер кадра в памяти. */
+        &s_u8g2, /* Куда сложить состояние дисплея. */
+        U8G2_R0, /* U8G2_R0 — без поворота картинки. */
+        u8g2_esp32_hal_i2c_byte_cb, /* Как u8g2 отдаёт байты кадра в наш I2C HAL. */
+        u8g2_esp32_hal_gpio_and_delay_cb); /* Как u8g2 просит задержку и дёргает GPIO, если они нужны контроллеру. */
     /* u8g2 ждёт 8-битный адрес, 0x3C << 1 = 0x78. */
-    u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1);
+    u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1); /* u8g2 ждёт 8-битный адрес: 0x3C, сдвинутый влево, это 0x78. */
     /* InitDisplay посылает контроллеру SSD1306 последовательность включения. */
-    u8g2_InitDisplay(&s_u8g2);
+    u8g2_InitDisplay(&s_u8g2); /* Послать контроллеру SSD1306 последовательность включения. */
     /* 0 выключает спящий режим стекла. 1 погасило бы картинку, не стирая буфер. */
-    u8g2_SetPowerSave(&s_u8g2, 0);
+    u8g2_SetPowerSave(&s_u8g2, 0); /* 0 выводит стекло из сна. 1 погасило бы картинку, не стирая буфер. */
     /*
      * Шрифт 5×8 с кириллицей. Обычный u8g2_font_5x8_tr этих букв не содержит.
      * Рисовать его нужно через DrawUTF8, DrawStr кириллицу из него не возьмёт.
      */
-    u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic);
+    u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic); /* Шрифт 5 на 8 с кириллицей. Обычный шрифт 5x8_tr этих букв не содержит. */
     /*
      * Режим 1 — прозрачные буквы: рисуются только точки глифа.
      * Так белая плашка выбранного пункта остаётся вокруг чёрных букв.
      * В режиме 0 фон буквы закрасил бы плашку обратно.
      */
-    u8g2_SetFontMode(&s_u8g2, 1);
-    contrast_apply(&s_u8g2, s_contrast);
-    return true;
+    u8g2_SetFontMode(&s_u8g2, 1); /* Режим 1 — прозрачные буквы: рисуются только точки глифа, плашка пункта не закрашивается. */
+    contrast_apply(&s_u8g2, s_contrast); /* Сразу выставить стартовую яркость 128, чтобы первое меню не было случайно тусклым. */
+    return true; /* Шина и контроллер готовы, app_main может рисовать меню. */
 }
 
-static void button_init(void)
+static void button_init(void) /* GPIO9 — вход с подтяжкой. Прерывание не нужно: кнопку опрашивает само меню. */
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BUTTON_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    gpio_config_t cfg = { /* Описание вывода. Пока это переменная, пин ещё не переключён. */
+        .pin_bit_mask = 1ULL << BUTTON_GPIO, /* Бит 9 в 64-битной маске. 1ULL нужен, чтобы сдвиг не обрезался на 32 битах. */
+        .mode = GPIO_MODE_INPUT, /* Читаем кнопку, свой уровень не выдаём. */
+        .pull_up_en = GPIO_PULLUP_ENABLE, /* Пока кнопку не трогают, на входе стабильная 1. */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, /* Подтяжка к земле выключена, иначе она спорила бы с подтяжкой вверх. */
+        .intr_type = GPIO_INTR_DISABLE, /* Будит не прерывание GPIO, а опрос в button_poll. */
     };
-    ESP_ERROR_CHECK(gpio_config(&cfg));
+    ESP_ERROR_CHECK(gpio_config(&cfg)); /* Применить описание. Ошибка настройки остановит программу до меню. */
 }
 
 /*
@@ -225,127 +225,127 @@ static void button_init(void)
  * Сначала ждём отпускания, чтобы длинное нажатие не превратилось
  * сразу во второе короткое.
  */
-static btn_event_t button_poll(void)
+static btn_event_t button_poll(void) /* Ждать нажатие и отличить короткое от длинного. Пока палец не отпущен, события нет. */
 {
     /* Подтяжка держит единицу. Ноль — кнопку прижали к земле. */
-    if (gpio_get_level(BUTTON_GPIO) != 0) {
-        return BTN_NONE;
+    if (gpio_get_level(BUTTON_GPIO) != 0) { /* Подтяжка держит единицу. Не ноль — кнопку не прижали, события нет. */
+        return BTN_NONE; /* Вернуть «пусто», меню просто подождёт и спросит снова. */
     }
     /* 30 мс — антидребезг. Если за это время уровень вернулся в 1, это был дребезг. */
-    vTaskDelay(pdMS_TO_TICKS(30));
-    if (gpio_get_level(BUTTON_GPIO) != 0) {
-        return BTN_NONE;
+    vTaskDelay(pdMS_TO_TICKS(30)); /* 30 мс антидребезг. За это время ложный импульс обычно уже кончился. */
+    if (gpio_get_level(BUTTON_GPIO) != 0) { /* Уровень вернулся в 1: это был дребезг, а не нажатие. */
+        return BTN_NONE; /* Снова пустое событие, курсор не двигаем. */
     }
 
     /* Время в микросекундах с запуска чипа. Разница двух вызовов — длительность нажатия. */
-    int64_t pressed_at = esp_timer_get_time();
-    while (gpio_get_level(BUTTON_GPIO) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    int64_t pressed_at = esp_timer_get_time(); /* Запомнить момент, когда нажатие подтвердилось. Разница двух вызовов — длительность. */
+    while (gpio_get_level(BUTTON_GPIO) == 0) { /* Ждём отпускания. Пока здесь ноль, событие ещё не готово. */
+        vTaskDelay(pdMS_TO_TICKS(10)); /* 10 мс между проверками, чтобы не крутить пустой цикл. */
     }
-    vTaskDelay(pdMS_TO_TICKS(30));
+    vTaskDelay(pdMS_TO_TICKS(30)); /* Ещё 30 мс после отпускания, чтобы дребезг спада не стал вторым нажатием. */
 
-    int64_t held = esp_timer_get_time() - pressed_at;
-    return held >= LONG_PRESS_US ? BTN_LONG : BTN_SHORT;
+    int64_t held = esp_timer_get_time() - pressed_at; /* Сколько микросекунд кнопку держали. */
+    return held >= LONG_PRESS_US ? BTN_LONG : BTN_SHORT; /* Не короче 500 мс — длинное нажатие, иначе короткое. */
 }
 
-static void draw_menu(const menu_frame_t *frame)
+static void draw_menu(const menu_frame_t *frame) /* Нарисовать текущий экран: заголовок, видимые пункты и ползунок, если список длинный. */
 {
-    int start = 0;
-    if (frame->cursor >= VISIBLE_ROWS) {
-        start = frame->cursor - VISIBLE_ROWS + 1;
+    int start = 0; /* С какой строки таблицы начинать окно. Ноль, пока курсор в первых трёх пунктах. */
+    if (frame->cursor >= VISIBLE_ROWS) { /* Курсор ушёл ниже окна. Иначе выбранный пункт оказался бы за нижним краем. */
+        start = frame->cursor - VISIBLE_ROWS + 1; /* Сдвинуть окно так, чтобы выбранная строка осталась последней видимой. */
     }
 
-    u8g2_ClearBuffer(&s_u8g2);
-    u8g2_DrawUTF8(&s_u8g2, 0, 8, frame->title);
-    u8g2_DrawHLine(&s_u8g2, 0, 10, 72);
+    u8g2_ClearBuffer(&s_u8g2); /* Стереть прошлый кадр в памяти. Стекло обновится только в SendBuffer. */
+    u8g2_DrawUTF8(&s_u8g2, 0, 8, frame->title); /* Заголовок экрана у верхнего края. Y=8 — базовая линия мелкого шрифта. */
+    u8g2_DrawHLine(&s_u8g2, 0, 10, 72); /* Линия под заголовком на всю ширину 72 пикселя. */
 
-    for (int row = 0; row < VISIBLE_ROWS; row++) {
-        int index = start + row;
-        if (index >= frame->count) {
-            break;
+    for (int row = 0; row < VISIBLE_ROWS; row++) { /* Три строки окна. Лишние пункты в этот кадр не входят. */
+        int index = start + row; /* Индекс в таблице, не номер строки на стекле. */
+        if (index >= frame->count) { /* Пункты кончились раньше, чем кончились строки окна. */
+            break; /* Ниже рисовать нечего, выходим из цикла. */
         }
-        int baseline = 20 + row * 10;
-        bool selected = index == frame->cursor;
-        if (selected) {
+        int baseline = 20 + row * 10; /* Базовая линия букв: 20, 30 и 40. Между строками 10 пикселей. */
+        bool selected = index == frame->cursor; /* Эта строка совпала с курсором — её надо подсветить. */
+        if (selected) { /* Выбранный пункт рисуем инверсно: сначала плашка, потом чёрные буквы. */
             u8g2_SetDrawColor(&s_u8g2, 1); /* Цвет 1 зажигает пиксели. */
             u8g2_DrawBox(&s_u8g2, 0, baseline - 7, 68, 9); /* Белая плашка выбранной строки. */
             u8g2_SetDrawColor(&s_u8g2, 0); /* Дальше буквы рисуются чёрным, поверх плашки. */
         }
-        u8g2_DrawUTF8(&s_u8g2, 2, baseline, frame->items[index].title);
+        u8g2_DrawUTF8(&s_u8g2, 2, baseline, frame->items[index].title); /* Текст пункта. У выбранного он чёрный поверх плашки, у остальных белый. */
         u8g2_SetDrawColor(&s_u8g2, 1); /* Вернуть обычный цвет для следующей строки. */
     }
 
-    if (frame->count > VISIBLE_ROWS) {
-        int track = 26;
-        int bar = track * VISIBLE_ROWS / frame->count;
-        if (bar < 3) {
-            bar = 3;
+    if (frame->count > VISIBLE_ROWS) { /* Список длиннее окна. Иначе ползунок только мешал бы. */
+        int track = 26; /* Высота дорожки ползунка в пикселях. */
+        int bar = track * VISIBLE_ROWS / frame->count; /* Высота самого ползунка пропорциональна тому, какая доля списка видна. */
+        if (bar < 3) { /* На очень длинном списке доля может схлопнуться в ноль пикселей. */
+            bar = 3; /* Минимум 3 пикселя, иначе ползунок не разглядеть. */
         }
-        int span = frame->count - VISIBLE_ROWS;
-        int y = 12 + (track - bar) * start / span;
-        u8g2_DrawBox(&s_u8g2, 70, y, 2, bar);
+        int span = frame->count - VISIBLE_ROWS; /* Сколько позиций прокрутки существует. На это число делится формула ниже. */
+        int y = 12 + (track - bar) * start / span; /* Координата Y ползунка. start — насколько окно уже сдвинуто. */
+        u8g2_DrawBox(&s_u8g2, 70, y, 2, bar); /* Узкая белая полоска у правого края: x=70, ширина 2. */
     }
-    u8g2_SendBuffer(&s_u8g2);
+    u8g2_SendBuffer(&s_u8g2); /* Один обмен I2C: весь собранный кадр уходит на стекло. */
 }
 
-static void menu_run(void)
+static void menu_run(void) /* Крутить меню, пока включено питание. Стек кадров помнит путь из корня. */
 {
-    menu_frame_t stack[MENU_DEPTH];
-    int depth = 0;
-    stack[0] = (menu_frame_t){
-        .title = "Меню",
-        .items = ROOT_ITEMS,
-        .count = (int)(sizeof(ROOT_ITEMS) / sizeof(ROOT_ITEMS[0])),
-        .cursor = 0,
+    menu_frame_t stack[MENU_DEPTH]; /* Куда кладём открытые экраны. Глубина ограничена MENU_DEPTH. */
+    int depth = 0; /* Ноль — на экране корень. Плюс один — вошли в подменю. */
+    stack[0] = (menu_frame_t){ /* Первый кадр. Пока это только заполнение структуры, рисунка ещё нет. */
+        .title = "Меню", /* Заголовок корня. */
+        .items = ROOT_ITEMS, /* Таблица двух пунктов: экран и система. */
+        .count = (int)(sizeof(ROOT_ITEMS) / sizeof(ROOT_ITEMS[0])), /* Длина корня через sizeof, чтобы не записать число пунктов вручную. */
+        .cursor = 0, /* Курсор на первом пункте. */
     };
 
-    bool dirty = true;
-    while (1) {
-        if (dirty) {
-            draw_menu(&stack[depth]);
-            dirty = false;
+    bool dirty = true; /* true заставляет нарисовать кадр сразу, не дожидаясь кнопки. */
+    while (1) { /* Опрос кнопки без конца. Выхода из меню в этом примере нет. */
+        if (dirty) { /* Кадр устарел: сменился курсор или экран. */
+            draw_menu(&stack[depth]); /* Перерисовать тот кадр, который сейчас наверху стека. */
+            dirty = false; /* Пока кнопка ничего не сделала, рисовать то же самое незачем. */
         }
 
-        btn_event_t event = button_poll();
-        if (event == BTN_NONE) {
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
+        btn_event_t event = button_poll(); /* Короткое, длинное или ничего. Функция сама ждёт отпускания. */
+        if (event == BTN_NONE) { /* Кнопку не трогали. */
+            vTaskDelay(pdMS_TO_TICKS(20)); /* 20 мс, чтобы опрос не занял процессор целиком. */
+            continue; /* К курсору не переходим. */
         }
 
-        menu_frame_t *frame = &stack[depth];
-        if (event == BTN_SHORT) {
+        menu_frame_t *frame = &stack[depth]; /* Верхний кадр. Курсор и таблица относятся к нему, не ко всему стеку. */
+        if (event == BTN_SHORT) { /* Короткое нажатие только двигает курсор, в пункт не входит. */
             /* Следующий пункт по кругу: после последнего снова первый. */
-            frame->cursor = (frame->cursor + 1) % frame->count;
-            dirty = true;
-            continue;
+            frame->cursor = (frame->cursor + 1) % frame->count; /* Следующий пункт по кругу: после последнего снова первый. */
+            dirty = true; /* Кадр надо перерисовать с новой плашкой. */
+            continue; /* Выбор пункта — это длинное нажатие, здесь его не обрабатываем. */
         }
 
-        const menu_item_t *item = &frame->items[frame->cursor];
+        const menu_item_t *item = &frame->items[frame->cursor]; /* Пункт под курсором. Дальше смотрим его kind. */
         /* Подменю кладётся на стек экранов. Возврат снимет верхний кадр. */
-        if (item->kind == ITEM_SUBMENU && depth + 1 < MENU_DEPTH) {
-            depth++;
-            stack[depth] = (menu_frame_t){
-                .title = item->title,
-                .items = item->children,
-                .count = item->child_count,
-                .cursor = 0,
+        if (item->kind == ITEM_SUBMENU && depth + 1 < MENU_DEPTH) { /* Подменю, и место в стеке ещё есть. Иначе глубокий вход молча игнорируем. */
+            depth++; /* Новый кадр ляжет поверх текущего. */
+            stack[depth] = (menu_frame_t){ /* Заполняем его из пункта, который выбрали. */
+                .title = item->title, /* Заголовок подменю — название пункта, через который вошли. */
+                .items = item->children, /* Таблица детей, на которую ссылался пункт. */
+                .count = item->child_count, /* Сколько детей записали при объявлении таблицы. */
+                .cursor = 0, /* В новом экране выбран первый пункт. */
             };
-        } else if (item->kind == ITEM_ACTION && item->action != NULL) {
-            item->action(&s_u8g2);
-        } else if (item->kind == ITEM_BACK && depth > 0) {
-            depth--;
+        } else if (item->kind == ITEM_ACTION && item->action != NULL) { /* Действие, и функция задана. У «назад» action равен NULL, сюда он не попадёт. */
+            item->action(&s_u8g2); /* Вызвать пункт. Он сам рисует свой экран, потом меню перерисуется. */
+        } else if (item->kind == ITEM_BACK && depth > 0) { /* Пункт «назад», и мы не в корне. В корне depth равен 0, снимать нечего. */
+            depth--; /* Снять верхний кадр. Предыдущий экран снова станет текущим. */
         }
-        dirty = true;
+        dirty = true; /* После входа, действия или возврата картинку надо собрать заново. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. Сначала кнопка и дисплей, потом бесконечное меню. */
 {
-    button_init();
-    if (!display_init()) {
-        ESP_LOGE(TAG, "дисплей не открылся, проверьте SDA=5 SCL=6 и адрес 0x3C");
-        return;
+    button_init(); /* GPIO9 должен быть входом до первого опроса. */
+    if (!display_init()) { /* Шина или контроллер не открылись. */
+        ESP_LOGE(TAG, "дисплей не открылся, проверьте SDA=5 SCL=6 и адрес 0x3C"); /* Подсказать распиновку и адрес. Меню без стекла не запускаем. */
+        return; /* Выходим из app_main. Задача main на этом закончится. */
     }
-    ESP_LOGI(TAG, "короткое нажатие — следующий пункт, длинное — выбор");
-    menu_run();
+    ESP_LOGI(TAG, "короткое нажатие — следующий пункт, длинное — выбор"); /* Напомнить жесты, если смотрят в монитор, а не на экран. */
+    menu_run(); /* Дальше управление сидит в цикле меню и само не возвращается. */
 }

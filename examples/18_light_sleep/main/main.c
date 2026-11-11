@@ -31,77 +31,77 @@
  * esp_sleep.h — включить источники пробуждения и вызвать esp_light_sleep_start.
  *   В отличие от глубокого сна, эта функция возвращает управление.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "esp_sleep.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* vTaskDelay ждёт отпускания кнопки и даёт строке лога уйти в USB. */
+#include "driver/gpio.h" /* Настроить GPIO9 входом с подтяжкой и разрешить ему будить чип. */
+#include "esp_log.h" /* Писать, чем чип проснулся. После лёгкого сна монитор не рвётся. */
+#include "esp_sleep.h" /* Включить источники пробуждения и вызвать esp_light_sleep_start. Функция вернёт управление. */
 
-#define BUTTON_GPIO GPIO_NUM_9
-#define SLEEP_SECONDS 8
+#define BUTTON_GPIO GPIO_NUM_9 /* Кнопка BOOT на типичной плате. Для лёгкого сна годится любой GPIO, не только 0…5. */
+#define SLEEP_SECONDS 8 /* Если кнопку не нажали, таймер разбудит чип через 8 секунд. */
 
-static const char *TAG = "light_sleep";
+static const char *TAG = "light_sleep"; /* Подпись строк монитора. */
 
-static const char *cause_text(esp_sleep_wakeup_cause_t cause)
+static const char *cause_text(esp_sleep_wakeup_cause_t cause) /* Переводит код причины в фразу. После лёгкого сна она относится к только что закончившемуся сну. */
 {
-    switch (cause) {
-    case ESP_SLEEP_WAKEUP_TIMER:
-        return "таймер";
-    case ESP_SLEEP_WAKEUP_GPIO:
-        return "кнопка GPIO9";
-    default:
-        return "другой источник";
+    switch (cause) { /* Смотрим, таймер это был или кнопка. */
+    case ESP_SLEEP_WAKEUP_TIMER: /* Истекли 8 секунд. */
+        return "таймер"; /* Фраза для монитора. */
+    case ESP_SLEEP_WAKEUP_GPIO: /* На GPIO9 был низкий уровень. */
+        return "кнопка GPIO9"; /* Та же кнопка, что в проекте с дисплеем. */
+    default: /* Источник есть, но пример его не ждёт. */
+        return "другой источник"; /* Запасная фраза, чтобы лог не остался пустым. */
     }
 }
 
-static void button_setup(void)
+static void button_setup(void) /* Один раз настроить кнопку и оба источника пробуждения. */
 {
-    gpio_config_t button = {
+    gpio_config_t button = { /* Описание вывода. Пока это переменная, сам GPIO ещё не переключён. */
         .pin_bit_mask = 1ULL << BUTTON_GPIO, /* Бит 9 в 64-битной маске — это GPIO9. */
-        .mode = GPIO_MODE_INPUT,
+        .mode = GPIO_MODE_INPUT, /* Читаем уровень кнопки, свой не выдаём. */
         .pull_up_en = GPIO_PULLUP_ENABLE, /* Пока кнопку не трогают, на входе стабильная 1. */
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, /* Подтяжка к земле выключена: покоем должна быть единица от подтяжки вверх. */
         .intr_type = GPIO_INTR_DISABLE, /* Будит чип не прерывание GPIO, а отдельный источник сна. */
     };
-    ESP_ERROR_CHECK(gpio_config(&button));
+    ESP_ERROR_CHECK(gpio_config(&button)); /* Применить описание. Ошибка настройки остановит программу, а не превратится в вечный сон. */
 
     /*
      * Для пробуждения допустимы только уровни HIGH и LOW, не фронты.
      * LOW совпадает с кнопкой, которая замыкает вывод на землю.
      */
-    ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_GPIO, GPIO_INTR_LOW_LEVEL));
-    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
-    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL));
+    ESP_ERROR_CHECK(gpio_wakeup_enable(BUTTON_GPIO, GPIO_INTR_LOW_LEVEL)); /* Низкий уровень на GPIO9 будит чип. Фронт здесь не подходит: источник ждёт уровень. */
+    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup()); /* Разрешить GPIO как источник лёгкого сна. Без этого gpio_wakeup_enable не сработает. */
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000ULL)); /* Второй источник: таймер на 8 секунд, в микросекундах. ULL защищает умножение от переполнения. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. Её вызывает ESP-IDF уже внутри задачи main. */
 {
-    int sleep_index = 0;
-    button_setup();
-    ESP_LOGI(TAG, "лёгкий сон на %d с или по кнопке GPIO%d", SLEEP_SECONDS, BUTTON_GPIO);
+    int sleep_index = 0; /* Сколько раз уходили в сон. В лёгком сне переменная не обнуляется. */
+    button_setup(); /* Настроить кнопку, GPIO-пробуждение и таймер до первого сна. */
+    ESP_LOGI(TAG, "лёгкий сон на %d с или по кнопке GPIO%d", SLEEP_SECONDS, BUTTON_GPIO); /* Коротко сказать, чем можно разбудить плату. */
 
-    while (true) {
-        if (gpio_get_level(BUTTON_GPIO) == 0) {
-            ESP_LOGW(TAG, "кнопка зажата, жду отпускания. Иначе сон сразу кончится");
-            while (gpio_get_level(BUTTON_GPIO) == 0) {
-                vTaskDelay(pdMS_TO_TICKS(50));
+    while (true) { /* Спать и просыпаться, пока включено питание. Перезагрузки в этом цикле нет. */
+        if (gpio_get_level(BUTTON_GPIO) == 0) { /* Ноль на входе значит, что кнопка уже зажата. В таком состоянии сон кончится сразу. */
+            ESP_LOGW(TAG, "кнопка зажата, жду отпускания. Иначе сон сразу кончится"); /* Предупредить: в сон войдём только после отпускания. */
+            while (gpio_get_level(BUTTON_GPIO) == 0) { /* Крутимся, пока палец на кнопке. Иначе чип проснётся в ту же микросекунду. */
+                vTaskDelay(pdMS_TO_TICKS(50)); /* 50 мс между проверками, чтобы не занимать процессор сплошным опросом. */
             }
         }
 
-        sleep_index++;
-        ESP_LOGI(TAG, "сон %d. Память и переменные сохранятся", sleep_index);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        sleep_index++; /* Плюс один к номеру сна. Число сохранится, потому что оперативная память под питанием. */
+        ESP_LOGI(TAG, "сон %d. Память и переменные сохранятся", sleep_index); /* Перед сном видно, что переменная жива и растёт. */
+        vTaskDelay(pdMS_TO_TICKS(50)); /* Короткая пауза, чтобы эта строка успела уйти в USB. */
 
         /*
          * Процессор останавливается здесь. Строка ниже выполнится уже после
          * пробуждения, переменная sleep_index при этом не сбросится.
          */
-        ESP_ERROR_CHECK(esp_light_sleep_start());
+        ESP_ERROR_CHECK(esp_light_sleep_start()); /* Остановить процессор. Следующая строка выполнится уже после пробуждения, sleep_index не сбросится. */
 
-        esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-        ESP_LOGI(TAG, "проснулись: %s. sleep_index по-прежнему %d",
-                 cause_text(cause), sleep_index);
+        esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause(); /* Узнать, таймер это был или кнопка. Вызов относится к сну, который только что закончился. */
+        ESP_LOGI(TAG, "проснулись: %s. sleep_index по-прежнему %d", /* Показать причину и тот же sleep_index: память после лёгкого сна цела. */
+                 cause_text(cause), sleep_index); /* Фраза причины и число, которое увеличили до сна. */
         /* Короткая пауза, чтобы лог успел уйти и кнопка успела отпуститься. */
-        vTaskDelay(pdMS_TO_TICKS(300));
+        vTaskDelay(pdMS_TO_TICKS(300)); /* 300 мс, чтобы лог ушёл и кнопка успела отпуститься перед следующим сном. */
     }
 }

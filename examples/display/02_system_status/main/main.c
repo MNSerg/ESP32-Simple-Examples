@@ -23,211 +23,211 @@
  * freertos/FreeRTOS.h и task.h — антидребезг кнопки и пауза между проверками.
  * u8g2.h и u8g2_esp32_hal.h — буфер кадра OLED и привязка этого буфера к I2C.
  */
-#include "driver/gpio.h"
-#include "driver/temperature_sensor.h"
-#include "esp_idf_version.h"
-#include "esp_log.h"
-#include "esp_system.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "u8g2.h"
-#include "u8g2_esp32_hal.h"
+#include "driver/gpio.h" /* Кнопка GPIO9 листает страницы. */
+#include "driver/temperature_sensor.h" /* Датчик внутри кристалла, не температура воздуха. */
+#include "esp_idf_version.h" /* esp_get_idf_version возвращает строку версии ESP-IDF. */
+#include "esp_log.h" /* Те же строки, что на стекле, дублируются в монитор. */
+#include "esp_system.h" /* Свободная куча и esp_reset_reason, причина последней перезагрузки. */
+#include "esp_timer.h" /* Микросекунды с запуска. Делим на миллион и получаем секунды работы. */
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* Антидребезг кнопки и пауза между проверками. */
+#include "u8g2.h" /* Буфер кадра OLED: стереть, написать строку, отправить на стекло. */
+#include "u8g2_esp32_hal.h" /* Привязка буфера u8g2 к I2C ESP32. */
 
-static const char *TAG = "status";
+static const char *TAG = "status"; /* Подпись строк монитора. */
 
-#define OLED_ADDR 0x3C
-#define BUTTON_GPIO GPIO_NUM_9
-#define PAGE_COUNT 4
-#define AUTO_FLIP_US 3000000
-#define REDRAW_US 1000000
+#define OLED_ADDR 0x3C /* 7-битный адрес OLED. В u8g2 он уйдёт сдвинутым на бит. */
+#define BUTTON_GPIO GPIO_NUM_9 /* Та же кнопка, что в меню. Нажатие сразу листает страницу. */
+#define PAGE_COUNT 4 /* Четыре страницы: чип, память, время, температура. */
+#define AUTO_FLIP_US 3000000 /* Сами листаем раз в 3 секунды, если кнопку не трогали. */
+#define REDRAW_US 1000000 /* Обновлять цифры на той же странице не реже раза в секунду. */
 
-static u8g2_t s_u8g2;
-static temperature_sensor_handle_t s_temp;
+static u8g2_t s_u8g2; /* Состояние дисплея и буфер кадра. */
+static temperature_sensor_handle_t s_temp; /* Ручка датчика. NULL, если его не удалось включить: на странице тогда будут прочерки. */
 
-static const char *reset_text(esp_reset_reason_t reason)
+static const char *reset_text(esp_reset_reason_t reason) /* Короткие подписи причин сброса. На стекле 72 на 40 длинная фраза не влезет. */
 {
-    switch (reason) {
-    case ESP_RST_POWERON:
-        return "питание";
-    case ESP_RST_SW:
-        return "программа";
-    case ESP_RST_PANIC:
-        return "panic";
-    case ESP_RST_INT_WDT:
-    case ESP_RST_TASK_WDT:
-    case ESP_RST_WDT:
-        return "watchdog";
-    case ESP_RST_DEEPSLEEP:
-        return "deep sleep";
-    case ESP_RST_BROWNOUT:
-        return "просадка";
-    case ESP_RST_USB:
-        return "USB";
-    default:
-        return "другое";
+    switch (reason) { /* Смотрим код уже случившейся перезагрузки. */
+    case ESP_RST_POWERON: /* Питание только что подали. */
+        return "питание"; /* Короткое слово для экрана. */
+    case ESP_RST_SW: /* Программный сброс, esp_restart или прошивка. */
+        return "программа"; /* Подпись для экрана. */
+    case ESP_RST_PANIC: /* Исключение или сработавший ESP_ERROR_CHECK. */
+        return "panic"; /* Короткое слово оставлено латиницей: русская фраза на стекло не влезает. */
+    case ESP_RST_INT_WDT: /* Сторож прерываний. */
+    case ESP_RST_TASK_WDT: /* Сторож задач. Подпись та же, места на уточнение нет. */
+    case ESP_RST_WDT: /* Прочий аппаратный сторож. Тоже одна подпись. */
+        return "watchdog"; /* Общее слово для всех трёх сторожей. */
+    case ESP_RST_DEEPSLEEP: /* Выход из глубокого сна, как в примере 17. */
+        return "deep sleep"; /* Короткая подпись латиницей, она помещается в третью строку. */
+    case ESP_RST_BROWNOUT: /* Напряжение просело, чип сам ушёл в сброс. */
+        return "просадка"; /* Подпись для экрана. */
+    case ESP_RST_USB: /* Перезагрузка пришла со стороны USB. */
+        return "USB"; /* Подпись для экрана. */
+    default: /* Код есть, но отдельной строки для него нет. */
+        return "другое"; /* Запасное слово, чтобы snprintf не получил пустой указатель. */
     }
 }
 
-static bool display_init(void)
+static bool display_init(void) /* Поднять OLED. false — страницы рисовать некуда. */
 {
-    u8g2_hal_config_t config = U8G2_HAL_CONFIG_DEFAULT;
-    config.i2c.sda = GPIO_NUM_5;
-    config.i2c.scl = GPIO_NUM_6;
-    config.i2c.port = I2C_NUM_0;
-    config.i2c.clk_speed = 400000;
+    u8g2_hal_config_t config = U8G2_HAL_CONFIG_DEFAULT; /* Типичные поля HAL. Ниже подставляем выводы этой платы. */
+    config.i2c.sda = GPIO_NUM_5; /* Линия SDA, GPIO5. */
+    config.i2c.scl = GPIO_NUM_6; /* Линия SCL, GPIO6. */
+    config.i2c.port = I2C_NUM_0; /* Единственный порт I2C на ESP32-C3. */
+    config.i2c.clk_speed = 400000; /* 400 кГц хватает для короткого шлейфа SSD1306. */
 
-    if (u8g2_hal_init(&config) != ESP_OK) {
-        return false;
+    if (u8g2_hal_init(&config) != ESP_OK) { /* Открыть шину. Ошибка значит, что выводы заняты или указаны неверно. */
+        return false; /* Контроллер не инициализируем: команд слать некуда. */
     }
 
     /* Профиль SSD1306 72×40. _f — полный буфер: рисуем в памяти, потом одним разом на стекло. */
-    u8g2_Setup_ssd1306_i2c_72x40_er_f(
-        &s_u8g2,
-        U8G2_R0,
-        u8g2_esp32_hal_i2c_byte_cb,
-        u8g2_esp32_hal_gpio_and_delay_cb);
-    u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1);
+    u8g2_Setup_ssd1306_i2c_72x40_er_f( /* Профиль SSD1306 72 на 40. Суффикс _f копит кадр в памяти. */
+        &s_u8g2, /* Куда сложить состояние дисплея. */
+        U8G2_R0, /* Без поворота картинки. */
+        u8g2_esp32_hal_i2c_byte_cb, /* Как u8g2 отдаёт байты в I2C HAL. */
+        u8g2_esp32_hal_gpio_and_delay_cb); /* Задержки и GPIO, если профилю контроллера они нужны. */
+    u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1); /* 8-битный адрес: 0x3C, сдвинутый влево, это 0x78. Так его ждёт u8g2. */
     u8g2_InitDisplay(&s_u8g2);      /* Последовательность включения контроллера SSD1306. */
     u8g2_SetPowerSave(&s_u8g2, 0);  /* 0 выводит стекло из сна. */
     u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic); /* Кириллица есть, но её рисует только DrawUTF8. */
     u8g2_SetContrast(&s_u8g2, 128); /* Середина диапазона 0…255, чтобы текст было видно. */
-    return true;
+    return true; /* Шина и контроллер готовы. */
 }
 
-static bool temp_init(void)
+static bool temp_init(void) /* Включить внутренний датчик. false — страница температуры покажет прочерки. */
 {
-    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
-    if (temperature_sensor_install(&cfg, &s_temp) != ESP_OK) {
-        s_temp = NULL;
-        return false;
+    temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50); /* Окно 10…50 °C выбирает коэффициенты драйвера. Это ожидание, не обрезка результата. */
+    if (temperature_sensor_install(&cfg, &s_temp) != ESP_OK) { /* Подготовить датчик и записать ручку. Измерять ещё нельзя. */
+        s_temp = NULL; /* Ручка недействительна, чтобы draw_page не читал мусор. */
+        return false; /* Сообщить вызывающему, что градусов не будет. */
     }
-    if (temperature_sensor_enable(s_temp) != ESP_OK) {
-        temperature_sensor_uninstall(s_temp);
-        s_temp = NULL;
-        return false;
+    if (temperature_sensor_enable(s_temp) != ESP_OK) { /* Включить измерение. После этого get_celsius возвращает градусы. */
+        temperature_sensor_uninstall(s_temp); /* Включение не удалось. Снять драйвер, чтобы не оставить его висеть. */
+        s_temp = NULL; /* Как и при ошибке установки, ручки больше нет. */
+        return false; /* Страница температуры пойдёт по ветке с прочерками. */
     }
-    return true;
+    return true; /* Датчик меряет, draw_page может его читать. */
 }
 
-static void button_init(void)
+static void button_init(void) /* GPIO9 — вход. Прерывание не нужно, страницы и так опрашивают кнопку. */
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << BUTTON_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    gpio_config_t cfg = { /* Описание вывода до применения. */
+        .pin_bit_mask = 1ULL << BUTTON_GPIO, /* Бит 9. Сдвиг 1ULL делает маску 64-битной. */
+        .mode = GPIO_MODE_INPUT, /* Читаем кнопку, уровень сами не выдаём. */
+        .pull_up_en = GPIO_PULLUP_ENABLE, /* Пока не нажата, на входе единица. */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, /* Подтяжка вниз выключена, иначе она спорила бы с верхней. */
+        .intr_type = GPIO_INTR_DISABLE, /* События GPIO нет: нажатие ловит button_pressed опросом. */
     };
-    ESP_ERROR_CHECK(gpio_config(&cfg));
+    ESP_ERROR_CHECK(gpio_config(&cfg)); /* Применить описание. Ошибка остановит программу до экрана. */
 }
 
-static bool button_pressed(void)
+static bool button_pressed(void) /* true, когда кнопку нажали и уже отпустили. Дребезг наружу не отдаём. */
 {
-    if (gpio_get_level(BUTTON_GPIO) != 0) {
-        return false;
+    if (gpio_get_level(BUTTON_GPIO) != 0) { /* Не ноль — палец не на кнопке. */
+        return false; /* Страницу не листаем. */
     }
-    vTaskDelay(pdMS_TO_TICKS(30));
-    if (gpio_get_level(BUTTON_GPIO) != 0) {
-        return false;
+    vTaskDelay(pdMS_TO_TICKS(30)); /* 30 мс антидребезг. */
+    if (gpio_get_level(BUTTON_GPIO) != 0) { /* Уровень вернулся: это был дребезг. */
+        return false; /* Считаем, что нажатия не было. */
     }
-    while (gpio_get_level(BUTTON_GPIO) == 0) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    while (gpio_get_level(BUTTON_GPIO) == 0) { /* Ждём отпускания, чтобы одно удержание не стало пачкой переключений. */
+        vTaskDelay(pdMS_TO_TICKS(10)); /* 10 мс между проверками. */
     }
-    vTaskDelay(pdMS_TO_TICKS(30));
-    return true;
+    vTaskDelay(pdMS_TO_TICKS(30)); /* Пауза после спада, чтобы дребезг не прочитался новым нажатием. */
+    return true; /* Жест закончен, вызывающий перелистнёт страницу. */
 }
 
-static void draw_page(int page)
+static void draw_page(int page) /* Собрать одну из четырёх страниц и вывести её на стекло и в монитор. */
 {
-    char line2[24];
-    char line3[24];
-    const char *title = "";
+    char line2[24]; /* Вторая строка экрана. 24 байта хватает на короткие числа. */
+    char line3[24]; /* Третья строка. */
+    const char *title = ""; /* Заголовок. Пустая строка перезапишется в каждой ветке switch. */
 
-    switch (page) {
-    case 0:
-        title = "Чип";
-        snprintf(line2, sizeof(line2), "ESP32-C3");
+    switch (page) { /* Номер страницы выбирает, какие три строки собирать. */
+    case 0: /* Первая страница, о самом чипе. */
+        title = "Чип"; /* Заголовок страницы чипа. */
+        snprintf(line2, sizeof(line2), "ESP32-C3"); /* Имя кристалла фиксировано: пример написан под ESP32-C3. */
         /* Частота берётся из sdkconfig, это та частота, с которой собран проект. */
-        snprintf(line3, sizeof(line3), "%d МГц", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
-        break;
-    case 1:
-        title = "Память";
-        snprintf(line2, sizeof(line2), "%" PRIu32 " б", esp_get_free_heap_size());
-        snprintf(line3, sizeof(line3), "мин %" PRIu32, esp_get_minimum_free_heap_size());
-        break;
-    case 2: {
+        snprintf(line3, sizeof(line3), "%d МГц", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ); /* Частота из sdkconfig, та, с которой собран проект, а не измеренная. */
+        break; /* Страница собрана, точки внизу рисуем уже после switch. */
+    case 1: /* Вторая страница, про кучу. */
+        title = "Память"; /* Заголовок страницы памяти. */
+        snprintf(line2, sizeof(line2), "%" PRIu32 " б", esp_get_free_heap_size()); /* Свободно сейчас, в байтах. PRIu32 нужен для uint32_t. */
+        snprintf(line3, sizeof(line3), "мин %" PRIu32, esp_get_minimum_free_heap_size()); /* Минимум с загрузки. Показывает, был ли провал. */
+        break; /* Выходим из ветки, чтобы не попасть в страницу времени. */
+    case 2: { /* Третья страница. Фигурные скобки дают область для переменной seconds. */
         /* esp_timer_get_time — микросекунды. Целое деление даёт прошедшие секунды. */
-        int64_t seconds = esp_timer_get_time() / 1000000;
-        title = "Время";
-        snprintf(line2, sizeof(line2), "%" PRId64 " с", seconds);
-        snprintf(line3, sizeof(line3), "%s", reset_text(esp_reset_reason()));
-        break;
+        int64_t seconds = esp_timer_get_time() / 1000000; /* Микросекунды с запуска делим на миллион: получаются целые секунды. */
+        title = "Время"; /* Заголовок страницы времени. */
+        snprintf(line2, sizeof(line2), "%" PRId64 " с", seconds); /* Число секунд. PRId64 печатает int64_t целиком. */
+        snprintf(line3, sizeof(line3), "%s", reset_text(esp_reset_reason())); /* Причина последней перезагрузки короткой подписью. */
+        break; /* Конец ветки времени. */
     }
-    default: {
-        float celsius = 0;
-        title = "Кристалл";
-        if (s_temp != NULL && temperature_sensor_get_celsius(s_temp, &celsius) == ESP_OK) {
-            snprintf(line2, sizeof(line2), "%.1f C", celsius);
-        } else {
-            snprintf(line2, sizeof(line2), "--");
+    default: { /* Четвёртая страница и любая другая: температура кристалла и версия IDF. */
+        float celsius = 0; /* Сюда драйвер запишет градусы. Ноль только до успешного чтения. */
+        title = "Кристалл"; /* Заголовок напоминает, что это не воздух в комнате. */
+        if (s_temp != NULL && temperature_sensor_get_celsius(s_temp, &celsius) == ESP_OK) { /* Ручка есть и чтение прошло. Иначе на стекле нельзя показывать ноль как температуру. */
+            snprintf(line2, sizeof(line2), "%.1f C", celsius); /* Один знак после запятой: датчик шумит сильнее. */
+        } else { /* Датчика нет или чтение вернуло ошибку. */
+            snprintf(line2, sizeof(line2), "--"); /* Два дефиса вместо выдуманного числа. */
         }
         /* %.8s берёт начало строки версии: на узком экране длинный суффикс не влезает. */
-        snprintf(line3, sizeof(line3), "IDF %.8s", esp_get_idf_version());
-        break;
+        snprintf(line3, sizeof(line3), "IDF %.8s", esp_get_idf_version()); /* %.8s берёт начало версии: длинный суффикс на узком экране не влезает. */
+        break; /* Конец ветки температуры. */
     }
     }
 
     u8g2_ClearBuffer(&s_u8g2); /* Стереть прошлую страницу в буфере, не на стекле. */
-    u8g2_DrawUTF8(&s_u8g2, 0, 10, title);
-    u8g2_DrawUTF8(&s_u8g2, 0, 22, line2);
-    u8g2_DrawUTF8(&s_u8g2, 0, 34, line3);
+    u8g2_DrawUTF8(&s_u8g2, 0, 10, title); /* Заголовок. Y=10 — базовая линия, не верх букв. */
+    u8g2_DrawUTF8(&s_u8g2, 0, 22, line2); /* Вторая строка. */
+    u8g2_DrawUTF8(&s_u8g2, 0, 34, line3); /* Третья строка. */
     /* Точки внизу показывают, какая из четырёх страниц открыта. */
-    for (int i = 0; i < PAGE_COUNT; i++) {
-        int x = 28 + i * 6;
-        if (i == page) {
-            u8g2_DrawBox(&s_u8g2, x, 37, 3, 3);
-        } else {
-            u8g2_DrawPixel(&s_u8g2, x + 1, 38);
+    for (int i = 0; i < PAGE_COUNT; i++) { /* Четыре отметки внизу, по числу страниц. */
+        int x = 28 + i * 6; /* Шаг 6 пикселей, чтобы точки не слиплись. 28 — отступ от левого края. */
+        if (i == page) { /* Открытая страница рисуется квадратом, остальные — точками. */
+            u8g2_DrawBox(&s_u8g2, x, 37, 3, 3); /* Квадрат 3 на 3 у нижней кромки стекла. */
+        } else { /* Не текущая страница. */
+            u8g2_DrawPixel(&s_u8g2, x + 1, 38); /* Одна точка по центру того же слота. */
         }
     }
-    u8g2_SendBuffer(&s_u8g2);
-    ESP_LOGI(TAG, "%s | %s | %s", title, line2, line3);
+    u8g2_SendBuffer(&s_u8g2); /* Отправить собранный кадр на OLED одним обменом I2C. */
+    ESP_LOGI(TAG, "%s | %s | %s", title, line2, line3); /* Те же три строки в монитор, чтобы страницу было видно и без стекла. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа: кнопка, датчик, дисплей и цикл листания. */
 {
-    button_init();
-    if (!temp_init()) {
-        ESP_LOGW(TAG, "датчик температуры не открылся, на странице будет --");
-        s_temp = NULL;
+    button_init(); /* GPIO9 готовим первым, чтобы опрос в цикле уже читал настоящий уровень. */
+    if (!temp_init()) { /* Датчик не обязателен: без него живы остальные три страницы. */
+        ESP_LOGW(TAG, "датчик температуры не открылся, на странице будет --"); /* Предупредить один раз. На стекле вместо градусов будут прочерки. */
+        s_temp = NULL; /* На всякий случай обнулить ручку, если инициализация вернула false и что-то записала. */
     }
-    if (!display_init()) {
-        ESP_LOGE(TAG, "дисплей не открылся, проверьте SDA=5 SCL=6 и адрес 0x3C");
-        return;
+    if (!display_init()) { /* Без дисплея показывать некуда. */
+        ESP_LOGE(TAG, "дисплей не открылся, проверьте SDA=5 SCL=6 и адрес 0x3C"); /* Распиновка и адрес, которые ждёт этот пример. */
+        return; /* Выходим. Крутить страницы в никуда незачем. */
     }
 
-    int page = 0;
-    int64_t last_draw = 0;
-    int64_t last_flip = esp_timer_get_time();
+    int page = 0; /* С какой страницы начать. Ноль — страница чипа. */
+    int64_t last_draw = 0; /* Когда последний раз рисовали. Ноль заставит первый кадр выйти сразу. */
+    int64_t last_flip = esp_timer_get_time(); /* Точка отсчёта автолистания. Три секунды пойдут от этого момента. */
 
-    while (1) {
-        bool flip = false;
-        if (button_pressed()) {
-            page = (page + 1) % PAGE_COUNT;
-            last_flip = esp_timer_get_time();
-            flip = true;
-        } else if (esp_timer_get_time() - last_flip >= AUTO_FLIP_US) {
-            page = (page + 1) % PAGE_COUNT;
-            last_flip = esp_timer_get_time();
-            flip = true;
+    while (1) { /* Листать, пока включено питание. */
+        bool flip = false; /* true, если в этом проходе страница сменилась и её надо нарисовать немедленно. */
+        if (button_pressed()) { /* Короткое или длинное нажатие одинаково листают вперёд. */
+            page = (page + 1) % PAGE_COUNT; /* Следующая страница по кругу: после четвёртой снова первая. */
+            last_flip = esp_timer_get_time(); /* Отложить автолистание: три секунды заново, от этого нажатия. */
+            flip = true; /* Рисовать сейчас, не ждать секунды между перерисовками. */
+        } else if (esp_timer_get_time() - last_flip >= AUTO_FLIP_US) { /* Кнопки не было, но с прошлого листания прошло не меньше 3 секунд. */
+            page = (page + 1) % PAGE_COUNT; /* Сами переходим на следующую страницу. */
+            last_flip = esp_timer_get_time(); /* Заново отсчитываем три секунды. */
+            flip = true; /* Кадр тоже обновить сразу, чтобы не ждать секундной перерисовки. */
         }
 
-        int64_t now = esp_timer_get_time();
-        if (flip || now - last_draw >= REDRAW_US) {
-            draw_page(page);
-            last_draw = now;
+        int64_t now = esp_timer_get_time(); /* Текущее время в микросекундах. Одним значением пользуемся и в сравнении, и в метке кадра. */
+        if (flip || now - last_draw >= REDRAW_US) { /* Страница сменилась или цифры на ней старше секунды. */
+            draw_page(page); /* Собрать текст и вывести его на стекло. */
+            last_draw = now; /* Запомнить момент кадра. Следующая перерисовка той же страницы не раньше чем через секунду. */
         }
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(30)); /* 30 мс сна, чтобы опрос кнопки не занял процессор сплошным циклом. */
     }
 }

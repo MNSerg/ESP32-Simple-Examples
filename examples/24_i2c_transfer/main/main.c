@@ -32,59 +32,59 @@
  * freertos/FreeRTOS.h и task.h — пауза между циклами и короткое ожидание,
  *   пока EEPROM заканчивает внутреннюю запись.
  */
-#include "driver/i2c_master.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "driver/i2c_master.h" /* Мастер I2C ESP-IDF 6: шина, запись, чтение и запись регистра с повторным стартом. */
+#include "esp_log.h" /* Печатать успех и текст ошибки. Ошибки здесь ожидаемы, поэтому их не прячут в ESP_ERROR_CHECK. */
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* Пауза между циклами и короткое ожидание, пока EEPROM заканчивает внутреннюю запись. */
 
-static const char *TAG = "i2c";
+static const char *TAG = "i2c"; /* Подпись строк монитора. */
 
-#define I2C_SDA GPIO_NUM_5
-#define I2C_SCL GPIO_NUM_6
-#define I2C_PORT I2C_NUM_0
-#define I2C_FREQ_HZ 100000
-#define XFER_TIMEOUT_MS 50
+#define I2C_SDA GPIO_NUM_5 /* Линия данных. На плате с OLED это обычно GPIO5. */
+#define I2C_SCL GPIO_NUM_6 /* Линия тактирования, пара к SDA. Здесь GPIO6. */
+#define I2C_PORT I2C_NUM_0 /* Единственный контроллер I2C на ESP32-C3. */
+#define I2C_FREQ_HZ 100000 /* 100 кГц, стандартная скорость: на длинных проводах так проще поймать ошибку. */
+#define XFER_TIMEOUT_MS 50 /* Сколько миллисекунд ждать конца одного обмена. Дольше — считаем, что шина зависла. */
 
-#define ADDR_EMPTY 0x01
-#define ADDR_OLED 0x3C
-#define ADDR_EEPROM 0x50
-#define EEPROM_CELL 0x10
-#define EEPROM_VALUE 0xA5
+#define ADDR_EMPTY 0x01 /* Адрес, по которому заведомо никого нет. На нём пример показывает NACK. */
+#define ADDR_OLED 0x3C /* Типичный адрес OLED SSD1306. Обмен пойдёт, только если probe получит ACK. */
+#define ADDR_EEPROM 0x50 /* Типичный адрес EEPROM 24Cxx. Тоже только после ACK. */
+#define EEPROM_CELL 0x10 /* Номер ячейки, куда пишем байт. Его же потом читаем обратно. */
+#define EEPROM_VALUE 0xA5 /* Байт-метка. Если из ячейки вернётся не он, запись и чтение не сошлись. */
 
-static i2c_master_bus_handle_t s_bus;
-static i2c_master_dev_handle_t s_empty;
-static i2c_master_dev_handle_t s_oled;
-static i2c_master_dev_handle_t s_eeprom;
-static bool s_eeprom_stored;
+static i2c_master_bus_handle_t s_bus; /* Ручка шины. Появится после i2c_new_master_bus, до этого обмена нет. */
+static i2c_master_dev_handle_t s_empty; /* Ручка пустого адреса 0x01. Регистрация не означает, что микросхема ответила. */
+static i2c_master_dev_handle_t s_oled; /* Ручка OLED 0x3C. Останется NULL, если драйвер не смог её зарегистрировать. */
+static i2c_master_dev_handle_t s_eeprom; /* Ручка EEPROM 0x50. */
+static bool s_eeprom_stored; /* true после первой успешной записи, чтобы не переписывать ячейку каждый цикл. */
 
-static const char *explain(esp_err_t err)
+static const char *explain(esp_err_t err) /* Переводит код ошибки в фразу. В логе рядом будет и смысл, и место сбоя. */
 {
-    switch (err) {
-    case ESP_OK:
-        return "ACK, обмен прошёл";
-    case ESP_ERR_NOT_FOUND:
-        return "probe получил NACK, адрес молчит";
-    case ESP_ERR_INVALID_RESPONSE:
-        return "NACK во время записи или чтения";
-    case ESP_ERR_TIMEOUT:
-        return "таймаут, шина не освободилась";
-    case ESP_ERR_INVALID_ARG:
-        return "неверные аргументы, повтор бессмыслен";
-    default:
-        return esp_err_to_name(err);
+    switch (err) { /* Разные коды чинить по-разному: не каждый NACK надо повторять. */
+    case ESP_OK: /* Обмен дошёл до конца, устройство ответило ACK. */
+        return "ACK, обмен прошёл"; /* Фраза для монитора. */
+    case ESP_ERR_NOT_FOUND: /* i2c_master_probe послал адрес и получил NACK. */
+        return "probe получил NACK, адрес молчит"; /* Фраза для монитора. Для EEPROM во время записи это нормально. */
+    case ESP_ERR_INVALID_RESPONSE: /* Тот же NACK, но уже внутри transmit или receive. */
+        return "NACK во время записи или чтения"; /* Фраза для монитора. */
+    case ESP_ERR_TIMEOUT: /* Обмен не закончился за отведённые миллисекунды. Шина могла застрять. */
+        return "таймаут, шина не освободилась"; /* Фраза для монитора. */
+    case ESP_ERR_INVALID_ARG: /* Ошибка в аргументах вызова. Повтор теми же данными ничего не починит. */
+        return "неверные аргументы, повтор бессмыслен"; /* Фраза для монитора. */
+    default: /* Код, который этот пример специально не разбирает. */
+        return esp_err_to_name(err); /* Имя кода из ESP-IDF, чтобы в логе не было голого числа. */
     }
 }
 
-static void recover_if_stuck(esp_err_t err)
+static void recover_if_stuck(esp_err_t err) /* Таймаут лечится сбросом шины. Остальные ошибки здесь не трогаем. */
 {
-    if (err != ESP_ERR_TIMEOUT) {
-        return;
+    if (err != ESP_ERR_TIMEOUT) { /* Не таймаут — выходим. NACK и неверный аргумент сбросом шины не чинятся. */
+        return; /* Вызов был не из-за застрявшей шины, делать нечего. */
     }
-    esp_err_t reset = i2c_master_bus_reset(s_bus);
-    if (reset == ESP_OK) {
-        ESP_LOGW(TAG, "шина сброшена после таймаута");
-    } else {
-        ESP_LOGE(TAG, "сброс шины не удался: %s", esp_err_to_name(reset));
+    esp_err_t reset = i2c_master_bus_reset(s_bus); /* Дёрнуть линии и вернуть контроллер в покой. Успех ещё не значит, что устройство ответило. */
+    if (reset == ESP_OK) { /* Сброс прошёл. */
+        ESP_LOGW(TAG, "шина сброшена после таймаута"); /* Записать, что шину восстановили после таймаута. */
+    } else { /* Сброс сам вернул ошибку. */
+        ESP_LOGE(TAG, "сброс шины не удался: %s", esp_err_to_name(reset)); /* Написать её имя. Дальше обмен по этой шине, скорее всего, тоже не пойдёт. */
     }
 }
 
@@ -93,208 +93,208 @@ static void recover_if_stuck(esp_err_t err)
  * микросхема могла быть занята. Таймаут сбрасывает шину один раз.
  * Неверный аргумент наружу отдаётся сразу.
  */
-static esp_err_t transfer_retry(i2c_master_dev_handle_t dev, const uint8_t *write_data, size_t write_len,
-                                uint8_t *read_data, size_t read_len)
+static esp_err_t transfer_retry(i2c_master_dev_handle_t dev, const uint8_t *write_data, size_t write_len, /* Общая обёртка: запись, чтение или оба сразу, с парой повторов. */
+                                uint8_t *read_data, size_t read_len) /* Куда положить принятые байты и сколько их ждать. NULL и 0, если читать нечего. */
 {
-    esp_err_t err = ESP_FAIL;
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        if (write_len > 0 && read_len > 0) {
+    esp_err_t err = ESP_FAIL; /* Начальное значение перезапишется в цикле. ESP_FAIL — чтобы не вернуть мусор, если цикл не пошёл. */
+    for (int attempt = 1; attempt <= 3; attempt++) { /* До трёх попыток. Занятая микросхема иногда отвечает со второй. */
+        if (write_len > 0 && read_len > 0) { /* Нужны и запись, и чтение: это адрес регистра, потом данные, без отпускания шины. */
             /*
              * Сначала запись, потом чтение, между ними повторный старт.
              * Шина не отпускается, поэтому устройство не забывает адрес регистра.
              */
-            err = i2c_master_transmit_receive(dev, write_data, write_len, read_data, read_len, XFER_TIMEOUT_MS);
-        } else if (write_len > 0) {
+            err = i2c_master_transmit_receive(dev, write_data, write_len, read_data, read_len, XFER_TIMEOUT_MS); /* Повторный старт между записью и чтением. Последний аргумент — сколько ждать конца обмена. */
+        } else if (write_len > 0) { /* Читать нечего, только отправить байты. */
             /* Только запись. Таймаут в миллисекундах: сколько ждать конца обмена. */
-            err = i2c_master_transmit(dev, write_data, write_len, XFER_TIMEOUT_MS);
-        } else {
+            err = i2c_master_transmit(dev, write_data, write_len, XFER_TIMEOUT_MS); /* Одна запись. Последний аргумент — таймаут в миллисекундах. */
+        } else { /* Писать нечего, только принять байты. */
             /* Только чтение. Мастер называет адрес с битом чтения и принимает байты. */
-            err = i2c_master_receive(dev, read_data, read_len, XFER_TIMEOUT_MS);
+            err = i2c_master_receive(dev, read_data, read_len, XFER_TIMEOUT_MS); /* Мастер называет адрес с битом чтения. Таймаут тот же. */
         }
 
-        if (err == ESP_OK || err == ESP_ERR_INVALID_ARG) {
-            return err;
+        if (err == ESP_OK || err == ESP_ERR_INVALID_ARG) { /* Успех возвращаем сразу. Неверный аргумент повторять бессмысленно. */
+            return err; /* Отдать код вызывающему, следующих попыток не будет. */
         }
-        if (err == ESP_ERR_TIMEOUT) {
-            recover_if_stuck(err);
-            return err;
+        if (err == ESP_ERR_TIMEOUT) { /* Шина не освободилась. Повтор той же транзакции без сброса обычно бесполезен. */
+            recover_if_stuck(err); /* Один сброс контроллера. Внутри функция ничего не делает, если это не таймаут. */
+            return err; /* Наружу отдаём таймаут. Ещё две попытки здесь только затянули бы зависание. */
         }
-        if (attempt < 3) {
-            ESP_LOGW(TAG, "попытка %d: %s", attempt, explain(err));
-            vTaskDelay(pdMS_TO_TICKS(2));
+        if (attempt < 3) { /* Остались попытки, и это NACK, не таймаут. */
+            ESP_LOGW(TAG, "попытка %d: %s", attempt, explain(err)); /* Показать, какая попытка не удалась и почему. */
+            vTaskDelay(pdMS_TO_TICKS(2)); /* 2 мс паузы: занятой микросхеме иногда хватает, чтобы снова ответить ACK. */
         }
     }
-    return err;
+    return err; /* Все попытки исчерпаны. Возвращаем последнюю ошибку, без лишнего повтора. */
 }
 
-static bool add_device(uint16_t address, i2c_master_dev_handle_t *out)
+static bool add_device(uint16_t address, i2c_master_dev_handle_t *out) /* Запомнить адрес на шине. Функция не проверяет, есть ли там микросхема. */
 {
-    i2c_device_config_t cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = address,
-        .scl_speed_hz = I2C_FREQ_HZ,
+    i2c_device_config_t cfg = { /* Описание устройства. Пока это переменная, на шину ещё ничего не ушло. */
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7, /* 7-битный адрес, как у OLED и EEPROM. 10-битные здесь не используем. */
+        .device_address = address, /* Адрес, который передал вызывающий: 0x01, 0x3C или 0x50. */
+        .scl_speed_hz = I2C_FREQ_HZ, /* Скорость именно этого устройства. Берём общие 100 кГц. */
     };
     /*
      * Регистрация не опрашивает микросхему. Адрес просто запоминается.
      * NACK появится позже, когда по этому адресу пойдут байты.
      */
-    esp_err_t err = i2c_master_bus_add_device(s_bus, &cfg, out);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "не удалось зарегистрировать 0x%02X: %s", address, explain(err));
-        *out = NULL;
-        return false;
+    esp_err_t err = i2c_master_bus_add_device(s_bus, &cfg, out); /* Прикрепить адрес к шине и записать ручку в out. NACK появится позже, на обмене. */
+    if (err != ESP_OK) { /* Регистрация не удалась: шина или аргументы, а не молчание микросхемы. */
+        ESP_LOGE(TAG, "не удалось зарегистрировать 0x%02X: %s", address, explain(err)); /* Адрес и текст ошибки, чтобы было видно, кого не удалось добавить. */
+        *out = NULL; /* Ручка недействительна. Вызывающий проверяет NULL и пропускает обмен. */
+        return false; /* Сообщить вызывающему, что устройства в таблице мастера нет. */
     }
-    return true;
+    return true; /* Адрес запомнен. Ответит ли микросхема, пока неизвестно. */
 }
 
-static bool probe_ok(uint16_t address)
+static bool probe_ok(uint16_t address) /* true, только если по адресу пришёл ACK. Иначе устройство в этом цикле пропускаем. */
 {
     /* probe шлёт адрес на запись и смотрит ACK. Устройства заранее регистрировать не нужно. */
-    esp_err_t err = i2c_master_probe(s_bus, address, XFER_TIMEOUT_MS);
-    if (err == ESP_OK) {
-        return true;
+    esp_err_t err = i2c_master_probe(s_bus, address, XFER_TIMEOUT_MS); /* Послать адрес на запись и дождаться ACK или NACK. Регистрировать устройство заранее не нужно. */
+    if (err == ESP_OK) { /* ACK: на адресе кто-то живой. */
+        return true; /* Можно писать и читать. */
     }
-    recover_if_stuck(err);
-    ESP_LOGI(TAG, "probe 0x%02X: %s", address, explain(err));
-    return false;
+    recover_if_stuck(err); /* Если это был таймаут, сбросить шину. NACK сюда тоже попадает, но сброс его не трогает. */
+    ESP_LOGI(TAG, "probe 0x%02X: %s", address, explain(err)); /* Написать, почему адреса нет. Для пустого 0x01 это ожидаемая строка. */
+    return false; /* Вызывающий пропустит запись и чтение. */
 }
 
-static void demo_missing(void)
+static void demo_missing(void) /* Показать ошибки на адресе, где заведомо никого нет. */
 {
-    esp_err_t probe = i2c_master_probe(s_bus, ADDR_EMPTY, XFER_TIMEOUT_MS);
-    ESP_LOGI(TAG, "пустой адрес 0x%02X, probe: %s", ADDR_EMPTY, explain(probe));
-    recover_if_stuck(probe);
-    if (probe == ESP_OK || s_empty == NULL) {
-        return;
+    esp_err_t probe = i2c_master_probe(s_bus, ADDR_EMPTY, XFER_TIMEOUT_MS); /* Probe пустого адреса. Ждём NACK, не панику. */
+    ESP_LOGI(TAG, "пустой адрес 0x%02X, probe: %s", ADDR_EMPTY, explain(probe)); /* Текст причины. Для 0x01 нормальная фраза — что probe получил NACK. */
+    recover_if_stuck(probe); /* Если шина зависла, восстановить её до следующих вызовов. */
+    if (probe == ESP_OK || s_empty == NULL) { /* ACK здесь странен, а NULL значит, что ручку не создали. Тогда transmit ниже некуда слать. */
+        return; /* Нечего демонстрировать: либо адрес внезапно ответил, либо ручки нет. */
     }
 
-    uint8_t byte = 0x00;
-    esp_err_t err = i2c_master_transmit(s_empty, &byte, 1, XFER_TIMEOUT_MS);
-    ESP_LOGI(TAG, "запись в 0x%02X без повторов: %s", ADDR_EMPTY, explain(err));
-    recover_if_stuck(err);
+    uint8_t byte = 0x00; /* Один байт-заглушка. Содержимое не важно: устройства всё равно нет. */
+    esp_err_t err = i2c_master_transmit(s_empty, &byte, 1, XFER_TIMEOUT_MS); /* Запись без повторов, чтобы увидеть сырой код NACK, а не работу transfer_retry. */
+    ESP_LOGI(TAG, "запись в 0x%02X без повторов: %s", ADDR_EMPTY, explain(err)); /* Ожидаем NACK уже во время transmit. */
+    recover_if_stuck(err); /* Таймаут почистить, NACK оставить как есть. */
 
-    uint8_t read_back = 0;
-    err = i2c_master_receive(s_empty, &read_back, 1, XFER_TIMEOUT_MS);
-    ESP_LOGI(TAG, "чтение из 0x%02X: %s", ADDR_EMPTY, explain(err));
-    recover_if_stuck(err);
+    uint8_t read_back = 0; /* Куда приняли бы байт, если бы устройство ответило. */
+    err = i2c_master_receive(s_empty, &read_back, 1, XFER_TIMEOUT_MS); /* Чтение с пустого адреса. Тоже без повторов. */
+    ESP_LOGI(TAG, "чтение из 0x%02X: %s", ADDR_EMPTY, explain(err)); /* И эта операция должна закончиться NACK. */
+    recover_if_stuck(err); /* Вернуть шину в покой, если чтение зависло. */
 }
 
-static void demo_oled(void)
+static void demo_oled(void) /* Команды OLED, только если модуль ответил на probe. */
 {
-    if (!probe_ok(ADDR_OLED) || s_oled == NULL) {
-        ESP_LOGI(TAG, "OLED 0x%02X нет, запись и чтение дисплея пропущены", ADDR_OLED);
-        return;
+    if (!probe_ok(ADDR_OLED) || s_oled == NULL) { /* Нет ACK или ручка не создана — дисплей в этом цикле не трогаем. */
+        ESP_LOGI(TAG, "OLED 0x%02X нет, запись и чтение дисплея пропущены", ADDR_OLED); /* Объяснить пропуск, чтобы тишина в логе не выглядела как зависание. */
+        return; /* Дальше в функции писать некуда. */
     }
 
     /*
      * 0x00 — «дальше команда контроллера», 0xAF — включить матрицу.
      * Повтор этой команды экран не портит.
      */
-    uint8_t command[] = {0x00, 0xAF};
-    esp_err_t err = transfer_retry(s_oled, command, sizeof(command), NULL, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "команда дисплею не ушла: %s", explain(err));
-        return;
+    uint8_t command[] = {0x00, 0xAF}; /* 0x00 говорит контроллеру «дальше команда», 0xAF включает матрицу. */
+    esp_err_t err = transfer_retry(s_oled, command, sizeof(command), NULL, 0); /* Записать оба байта с повторами. Читать нечего: NULL и длина 0. */
+    if (err != ESP_OK) { /* После трёх попыток команда так и не ушла. */
+        ESP_LOGE(TAG, "команда дисплею не ушла: %s", explain(err)); /* Текст ошибки. Экран в этом цикле не включаем. */
+        return; /* Статус ниже тоже не читаем: шина или адрес уже подвели. */
     }
-    ESP_LOGI(TAG, "в OLED записано включение экрана");
+    ESP_LOGI(TAG, "в OLED записано включение экрана"); /* Команда прошла. Повтор включения экран не портит. */
 
     /*
      * Один байт чтения с 0x3C — регистр состояния SSD1306.
      * Часть модулей на чтение не отвечает, хотя запись у них работает.
      */
-    uint8_t status = 0;
-    err = transfer_retry(s_oled, NULL, 0, &status, 1);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "статус OLED: 0x%02X", status);
-    } else {
-        ESP_LOGW(TAG, "этот модуль не отдал статус: %s", explain(err));
+    uint8_t status = 0; /* Сюда попадёт регистр состояния, если модуль умеет читаться. */
+    err = transfer_retry(s_oled, NULL, 0, &status, 1); /* Один байт чтения без предварительной записи. */
+    if (err == ESP_OK) { /* Модуль ответил на чтение. */
+        ESP_LOGI(TAG, "статус OLED: 0x%02X", status); /* Показать байт состояния. */
+    } else { /* Запись у таких модулей часто работает, а чтение — нет. */
+        ESP_LOGW(TAG, "этот модуль не отдал статус: %s", explain(err)); /* Это предупреждение, не повод считать шину сломанной. */
     }
 }
 
-static void eeprom_wait_ready(void)
+static void eeprom_wait_ready(void) /* Ждать, пока EEPROM закончит внутреннюю запись и снова начнёт отвечать ACK. */
 {
-    for (int attempt = 1; attempt <= 20; attempt++) {
-        esp_err_t err = i2c_master_probe(s_bus, ADDR_EEPROM, XFER_TIMEOUT_MS);
-        if (err == ESP_OK) {
-            ESP_LOGI(TAG, "EEPROM снова отвечает, попытка %d", attempt);
-            return;
+    for (int attempt = 1; attempt <= 20; attempt++) { /* До 20 миллисекунд. Цикл записи обычно укладывается в несколько. */
+        esp_err_t err = i2c_master_probe(s_bus, ADDR_EEPROM, XFER_TIMEOUT_MS); /* Probe во время записи получает NACK. Это не значит, что микросхему отключили. */
+        if (err == ESP_OK) { /* ACK вернулся: внутренний цикл записи закончился. */
+            ESP_LOGI(TAG, "EEPROM снова отвечает, попытка %d", attempt); /* Видно, на какой миллисекунде память снова жива. */
+            return; /* Можно читать ячейку. */
         }
-        if (err == ESP_ERR_TIMEOUT) {
-            recover_if_stuck(err);
-            return;
+        if (err == ESP_ERR_TIMEOUT) { /* Таймаут — это уже застрявшая шина, а не занятая EEPROM. */
+            recover_if_stuck(err); /* Сбросить контроллер. */
+            return; /* Дочитывать в этом состоянии бессмысленно. */
         }
         /* NOT_FOUND здесь значит «идёт цикл записи», а не «микросхемы нет». */
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(1)); /* 1 мс и снова probe. NACK здесь значит «идёт цикл записи». */
     }
-    ESP_LOGW(TAG, "EEPROM не ответила после записи");
+    ESP_LOGW(TAG, "EEPROM не ответила после записи"); /* За 20 мс ACK так и не пришёл. */
 }
 
-static void demo_eeprom(void)
+static void demo_eeprom(void) /* Записать байт-метку и прочитать его обратно, если EEPROM на шине есть. */
 {
-    if (!probe_ok(ADDR_EEPROM) || s_eeprom == NULL) {
-        ESP_LOGI(TAG, "EEPROM 0x%02X нет, проверка ячейки пропущена", ADDR_EEPROM);
-        return;
+    if (!probe_ok(ADDR_EEPROM) || s_eeprom == NULL) { /* Нет устройства — проверку ячейки пропускаем, это не ошибка примера. */
+        ESP_LOGI(TAG, "EEPROM 0x%02X нет, проверка ячейки пропущена", ADDR_EEPROM); /* Объяснить пропуск. */
+        return; /* Не пишем в NULL и не ждём данные. */
     }
 
-    if (!s_eeprom_stored) {
-        uint8_t payload[] = {EEPROM_CELL, EEPROM_VALUE};
-        esp_err_t err = transfer_retry(s_eeprom, payload, sizeof(payload), NULL, 0);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "запись EEPROM не удалась: %s", explain(err));
-            return;
+    if (!s_eeprom_stored) { /* Пишем один раз за всё время работы. Повтор каждый цикл зря стирал бы одну и ту же ячейку. */
+        uint8_t payload[] = {EEPROM_CELL, EEPROM_VALUE}; /* Первый байт — адрес ячейки, второй — значение. EEPROM ждёт их одной записью. */
+        esp_err_t err = transfer_retry(s_eeprom, payload, sizeof(payload), NULL, 0); /* Отправить пару байт с повторами. Чтения в этой транзакции нет. */
+        if (err != ESP_OK) { /* Запись не подтвердилась. */
+            ESP_LOGE(TAG, "запись EEPROM не удалась: %s", explain(err)); /* Текст ошибки. Ячейку ниже не читаем: сравнивать пока не с чем. */
+            return; /* Выходим, флаг успешной записи не ставим, следующая итерация попробует снова. */
         }
-        ESP_LOGI(TAG, "в ячейку 0x%02X записан 0x%02X, ждём конец цикла записи", EEPROM_CELL, EEPROM_VALUE);
-        eeprom_wait_ready();
-        s_eeprom_stored = true;
+        ESP_LOGI(TAG, "в ячейку 0x%02X записан 0x%02X, ждём конец цикла записи", EEPROM_CELL, EEPROM_VALUE); /* Сказать, что именно ушло в микросхему, и что сейчас будет пауза. */
+        eeprom_wait_ready(); /* Крутить probe, пока NACK не сменится на ACK. */
+        s_eeprom_stored = true; /* Запомнили, что ячейка уже записана. Следующие циклы только читают. */
     }
 
-    uint8_t cell = EEPROM_CELL;
-    uint8_t value = 0;
+    uint8_t cell = EEPROM_CELL; /* Адрес ячейки отдадим записью перед чтением. */
+    uint8_t value = 0; /* Сюда transfer_retry положит байт из EEPROM. */
     /*
      * transmit_receive держит шину: адрес ячейки и чтение идут
      * с повторным стартом. Две отдельные транзакции здесь неверны,
      * указатель внутри EEPROM между ними никто не обещает сохранить.
      */
-    esp_err_t err = transfer_retry(s_eeprom, &cell, 1, &value, 1);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "чтение EEPROM не удалось: %s", explain(err));
-        return;
+    esp_err_t err = transfer_retry(s_eeprom, &cell, 1, &value, 1); /* Запись адреса и чтение значения одним обменом с повторным стартом. */
+    if (err != ESP_OK) { /* Не прочитали. */
+        ESP_LOGE(TAG, "чтение EEPROM не удалось: %s", explain(err)); /* Текст ошибки. Сравнивать value нельзя: там по-прежнему ноль. */
+        return; /* Выходим без ложной проверки данных. */
     }
-    if (value != EEPROM_VALUE) {
-        ESP_LOGE(TAG, "шина исправна, но данные не сошлись: ждали 0x%02X, прочитали 0x%02X",
-                 EEPROM_VALUE, value);
-        return;
+    if (value != EEPROM_VALUE) { /* Шина ответила, но байт не тот, который писали. */
+        ESP_LOGE(TAG, "шина исправна, но данные не сошлись: ждали 0x%02X, прочитали 0x%02X", /* Начало фразы: что ждали и что прочитали. */
+                 EEPROM_VALUE, value); /* Подставить константу и фактический байт. */
+        return; /* Это уже ошибка данных, не ошибка шины. */
     }
-    ESP_LOGI(TAG, "EEPROM вернула 0x%02X, запись и чтение совпали", value);
+    ESP_LOGI(TAG, "EEPROM вернула 0x%02X, запись и чтение совпали", value); /* Запись и чтение совпали. Проверка EEPROM на этом закончена. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа: поднять шину, зарегистрировать три адреса и крутить демонстрации. */
 {
-    i2c_master_bus_config_t bus = {
-        .i2c_port = I2C_PORT,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+    i2c_master_bus_config_t bus = { /* Описание шины. Контроллер включится только в i2c_new_master_bus. */
+        .i2c_port = I2C_PORT, /* Какой из контроллеров чипа забирать. На C3 это единственный порт. */
+        .sda_io_num = I2C_SDA, /* Вывод данных. */
+        .scl_io_num = I2C_SCL, /* Вывод тактирования. */
+        .clk_source = I2C_CLK_SRC_DEFAULT, /* Источник тактирования по умолчанию, отдельный клок настраивать не нужно. */
+        .glitch_ignore_cnt = 7, /* Игнорировать короткие иголки на линии. 7 — обычный фильтр дребезга драйвера. */
+        .flags.enable_internal_pullup = true, /* Включить внутренние подтяжки. Внешние к 3.3 В всё равно надёжнее. */
     };
     /* Включить контроллер. Успех здесь значит «выводы заняты мастером», а не «кто-то ответил». */
-    esp_err_t err = i2c_new_master_bus(&bus, &s_bus);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "шина не открылась: %s. Проверьте GPIO5, GPIO6 и подтяжки к 3.3 В",
-                 esp_err_to_name(err));
-        return;
+    esp_err_t err = i2c_new_master_bus(&bus, &s_bus); /* Занять GPIO мастером и записать ручку. ACK от микросхем тут ещё не проверяется. */
+    if (err != ESP_OK) { /* Шина не открылась: неверные выводы или контроллер уже занят. */
+        ESP_LOGE(TAG, "шина не открылась: %s. Проверьте GPIO5, GPIO6 и подтяжки к 3.3 В", /* Подсказать, что проверить на плате. */
+                 esp_err_to_name(err)); /* Имя кода ESP-IDF. */
+        return; /* Без шины probe и запись ниже невозможны. */
     }
 
-    add_device(ADDR_EMPTY, &s_empty);
-    add_device(ADDR_OLED, &s_oled);
-    add_device(ADDR_EEPROM, &s_eeprom);
-    ESP_LOGI(TAG, "SDA=GPIO%d SCL=GPIO%d. Ошибки ниже для пустого адреса ожидаемы", I2C_SDA, I2C_SCL);
+    add_device(ADDR_EMPTY, &s_empty); /* Запомнить пустой адрес. Ошибки по нему ниже учебные, не авария. */
+    add_device(ADDR_OLED, &s_oled); /* Запомнить OLED. Если модуля нет, probe это покажет. */
+    add_device(ADDR_EEPROM, &s_eeprom); /* Запомнить EEPROM. */
+    ESP_LOGI(TAG, "SDA=GPIO%d SCL=GPIO%d. Ошибки ниже для пустого адреса ожидаемы", I2C_SDA, I2C_SCL); /* Напомнить распиновку. Строки про пустой адрес в мониторе ожидаемы. */
 
-    while (1) {
-        demo_missing();
-        demo_oled();
-        demo_eeprom();
-        vTaskDelay(pdMS_TO_TICKS(2000));
+    while (1) { /* Повторять три демонстрации, пока включено питание. */
+        demo_missing(); /* Сначала ошибки на пустом адресе. */
+        demo_oled(); /* Потом OLED, если он ответил. */
+        demo_eeprom(); /* Затем EEPROM: запись один раз и чтение каждый цикл. */
+        vTaskDelay(pdMS_TO_TICKS(2000)); /* Две секунды паузы, чтобы лог можно было читать, а не смотреть сплошной поток. */
     }
 }

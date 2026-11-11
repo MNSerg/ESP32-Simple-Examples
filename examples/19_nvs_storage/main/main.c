@@ -30,76 +30,76 @@
  * nvs.h — открыть пространство имён, прочитать и записать ключ, сбросить кэш на flash.
  * nvs_flash.h — подготовить сам раздел flash. nvs.h работает уже внутри него.
  */
-#include "esp_log.h"
-#include "nvs.h"
-#include "nvs_flash.h"
+#include "esp_log.h" /* Печать прочитанных значений в монитор. */
+#include "nvs.h" /* Открыть пространство имён, прочитать и записать ключ, сбросить кэш на flash. */
+#include "nvs_flash.h" /* Подготовить раздел flash. Вызовы nvs.h работают уже внутри него. */
 
-static const char *TAG = "nvs";
-static const char *NAMESPACE = "storage";
+static const char *TAG = "nvs"; /* Подпись строк монитора. */
+static const char *NAMESPACE = "storage"; /* Имя пространства имён, до 15 символов. Ключи boots и note живут внутри него. */
 
-static void nvs_setup(void)
+static void nvs_setup(void) /* Подготовить раздел NVS и починить его, если формат испорчен. */
 {
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(TAG, "раздел NVS надо стереть (%s)", esp_err_to_name(err));
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
+    esp_err_t err = nvs_flash_init(); /* Смонтировать раздел. Ошибка здесь ещё не значит, что данные потеряны навсегда. */
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) { /* Нет свободных страниц или раздел от другой версии ESP-IDF. Лечится стиранием. */
+        ESP_LOGW(TAG, "раздел NVS надо стереть (%s)", esp_err_to_name(err)); /* Написать причину до стирания: имя кода понятнее голого числа. */
+        ESP_ERROR_CHECK(nvs_flash_erase()); /* Стереть раздел. Все старые ключи, включая калибровку Wi-Fi, пропадут. */
+        err = nvs_flash_init(); /* Повторить инициализацию уже на чистом разделе. */
     }
-    ESP_ERROR_CHECK(err);
+    ESP_ERROR_CHECK(err); /* Любая другая ошибка останавливает программу: без NVS пример бессмысленен. */
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. Здесь читаем прошлое значение и записываем новое. */
 {
-    nvs_setup();
+    nvs_setup(); /* Раздел должен быть готов до nvs_open. */
 
-    nvs_handle_t handle;
+    nvs_handle_t handle; /* Сюда nvs_open положит ручку. Пока она не открыта, читать ключи нельзя. */
     /*
      * nvs_open открывает пространство «storage» и на чтение, и на запись.
      * Ручка handle дальше заменяет имя пространства во всех вызовах.
      */
-    ESP_ERROR_CHECK(nvs_open(NAMESPACE, NVS_READWRITE, &handle));
+    ESP_ERROR_CHECK(nvs_open(NAMESPACE, NVS_READWRITE, &handle)); /* Открыть пространство storage на чтение и запись. Ручка дальше заменяет имя пространства. */
 
-    int32_t boots = 0;
+    int32_t boots = 0; /* Ноль на случай, если ключа ещё нет. Иначе сюда попадёт прошлое число загрузок. */
     /* Прочитать прошлое значение. Ключа нет только при самом первом запуске. */
-    esp_err_t err = nvs_get_i32(handle, "boots", &boots);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "ключ boots ещё не создан, начинаю с нуля");
-        boots = 0;
-    } else {
-        ESP_ERROR_CHECK(err);
+    esp_err_t err = nvs_get_i32(handle, "boots", &boots); /* Прочитать int32 по ключу boots. NOT_FOUND бывает только при первом запуске. */
+    if (err == ESP_ERR_NVS_NOT_FOUND) { /* Ключа нет: это не поломка, а пустое хранилище. */
+        ESP_LOGI(TAG, "ключ boots ещё не создан, начинаю с нуля"); /* Объяснить в мониторе, почему начинаем с нуля. */
+        boots = 0; /* Явно обнулить, чтобы следующий плюс один дал первую загрузку. */
+    } else { /* Ключ нашёлся или произошла настоящая ошибка чтения. */
+        ESP_ERROR_CHECK(err); /* NOT_FOUND уже обработан. Любой другой код останавливает программу. */
     }
-    boots++;
+    boots++; /* Эта загрузка тоже считается. Плюс один к тому, что прочитали из flash. */
     /* set кладёт значение в кэш. На flash оно попадёт только в nvs_commit ниже. */
-    ESP_ERROR_CHECK(nvs_set_i32(handle, "boots", boots));
+    ESP_ERROR_CHECK(nvs_set_i32(handle, "boots", boots)); /* Положить новое число в кэш. На flash оно попадёт только в nvs_commit. */
 
     /*
      * Строка хранится вместе с завершающим нулём, если пользоваться
      * nvs_set_str / nvs_get_str. Длина буфера на чтение — это и вход
      * (сколько места есть), и выход (сколько байт заняла строка).
      */
-    char note[32];
-    size_t note_length = sizeof(note);
-    err = nvs_get_str(handle, "note", note, &note_length);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGI(TAG, "ключ note ещё не создан");
-        note[0] = 0;
-    } else {
-        ESP_ERROR_CHECK(err);
-        ESP_LOGI(TAG, "прошлая заметка: \"%s\"", note);
+    char note[32]; /* Буфер заметки. 32 байта хватает на слово boot и число. */
+    size_t note_length = sizeof(note); /* На входе — сколько места есть. nvs_get_str запишет сюда, сколько байт заняла строка. */
+    err = nvs_get_str(handle, "note", note, &note_length); /* Прочитать прошлую строку вместе с завершающим нулём. */
+    if (err == ESP_ERR_NVS_NOT_FOUND) { /* Первая загрузка: ключа note ещё не создавали. */
+        ESP_LOGI(TAG, "ключ note ещё не создан"); /* Сообщить, что читать пока нечего. */
+        note[0] = 0; /* Пустая строка в буфере, чтобы дальше не печатать мусор. */
+    } else { /* Строка прочитана или чтение сломалось. */
+        ESP_ERROR_CHECK(err); /* Ошибка, кроме «ключа нет», останавливает пример. */
+        ESP_LOGI(TAG, "прошлая заметка: \"%s\"", note); /* Показать, что лежало во flash до этой загрузки. */
     }
 
-    snprintf(note, sizeof(note), "boot %" PRId32, boots);
-    ESP_ERROR_CHECK(nvs_set_str(handle, "note", note));
+    snprintf(note, sizeof(note), "boot %" PRId32, boots); /* Собрать новую заметку из номера загрузки. Старый текст в буфере больше не нужен. */
+    ESP_ERROR_CHECK(nvs_set_str(handle, "note", note)); /* Положить строку в кэш того же пространства. Commit ниже запишет и число, и текст. */
 
     /*
      * commit сбрасывает кэш этого пространства на flash.
      * Имеет смысл копить несколько set и вызывать commit один раз:
      * флеш изнашивается от числа стираний, а не от числа переменных в программе.
      */
-    ESP_ERROR_CHECK(nvs_commit(handle));
+    ESP_ERROR_CHECK(nvs_commit(handle)); /* Сбросить кэш на flash. Без этой строки выключение сотрёт то, что только что записали. */
     /* close отпускает ручку. Данные уже во flash, ручка больше не нужна. */
-    nvs_close(handle);
+    nvs_close(handle); /* Отпустить ручку. Данные уже во flash, держать пространство открытым незачем. */
 
-    ESP_LOGI(TAG, "загрузка %" PRId32 " записана. Заметка теперь \"%s\"", boots, note);
-    ESP_LOGI(TAG, "нажмите кнопку RESET или снимите питание: число увеличится на 1");
+    ESP_LOGI(TAG, "загрузка %" PRId32 " записана. Заметка теперь \"%s\"", boots, note); /* Подтвердить, что число и новая заметка ушли в хранилище. */
+    ESP_LOGI(TAG, "нажмите кнопку RESET или снимите питание: число увеличится на 1"); /* Подсказать проверку: RESET или снятие питания, число вырастет на 1. */
 }

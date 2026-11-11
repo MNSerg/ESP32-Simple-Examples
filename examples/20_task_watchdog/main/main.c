@@ -34,64 +34,64 @@
  * esp_task_wdt.h — подписать задачу на сторож и сбросить его таймер.
  *   Таймаут 3 секунды задан не здесь, а в sdkconfig.defaults.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_system.h"
-#include "esp_task_wdt.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика. Этот файл подключают раньше task.h. */
+#include "freertos/task.h" /* vTaskDelay делает паузу в одну секунду. Пока задача спит, она не кормит сторож. */
+#include "esp_log.h" /* Журнал: видно и нормальные циклы, и момент, когда кормление прекратилось. */
+#include "esp_system.h" /* esp_reset_reason говорит, почему чип загрузился в этот раз. */
+#include "esp_task_wdt.h" /* Подписать задачу на сторож и сбросить его таймер. Таймаут 3 секунды задан в sdkconfig. */
 
-static const char *TAG = "wdt";
+static const char *TAG = "wdt"; /* Подпись строк монитора. */
 
-static const char *reset_reason_text(esp_reset_reason_t reason)
+static const char *reset_reason_text(esp_reset_reason_t reason) /* Переводит код перезагрузки в фразу. Сырой номер рядом тоже напечатаем. */
 {
-    switch (reason) {
-    case ESP_RST_POWERON:
-        return "включение питания";
-    case ESP_RST_EXT:
-        return "внешний вывод сброса";
-    case ESP_RST_SW:
-        return "программный сброс";
-    case ESP_RST_PANIC:
-        return "паника: исключение или проверка ESP_ERROR_CHECK";
-    case ESP_RST_INT_WDT:
-        return "сторож прерываний";
-    case ESP_RST_TASK_WDT:
-        return "сторож задач";
-    case ESP_RST_WDT:
-        return "другой аппаратный сторож";
-    case ESP_RST_DEEPSLEEP:
-        return "выход из глубокого сна";
-    case ESP_RST_BROWNOUT:
-        return "просадка питания";
-    case ESP_RST_USB:
-        return "USB";
-    default:
-        return "неизвестная причина";
+    switch (reason) { /* Смотрим причину уже случившейся загрузки, не будущей. */
+    case ESP_RST_POWERON: /* Питание только что подали, сторож ни при чём. */
+        return "включение питания"; /* Фраза для монитора. */
+    case ESP_RST_EXT: /* Сигнал на выводе сброса, не программный. */
+        return "внешний вывод сброса"; /* Фраза для монитора. */
+    case ESP_RST_SW: /* Кто-то вызвал esp_restart или аналог. */
+        return "программный сброс"; /* Фраза для монитора. */
+    case ESP_RST_PANIC: /* Упали на исключении или ESP_ERROR_CHECK увидел ошибку. */
+        return "паника: исключение или проверка ESP_ERROR_CHECK"; /* Фраза для монитора. */
+    case ESP_RST_INT_WDT: /* Прерывание не завершилось, сработал другой сторож. */
+        return "сторож прерываний"; /* Фраза для монитора. */
+    case ESP_RST_TASK_WDT: /* Подписанная задача слишком долго не вызывала esp_task_wdt_reset. Это цель примера. */
+        return "сторож задач"; /* Фраза, которую увидите после зависания ниже. */
+    case ESP_RST_WDT: /* Сработал аппаратный сторож, но не сторож задач и не сторож прерываний. */
+        return "другой аппаратный сторож"; /* Фраза для монитора. */
+    case ESP_RST_DEEPSLEEP: /* Чип включился после esp_deep_sleep_start, как в примере 17. */
+        return "выход из глубокого сна"; /* Фраза для монитора. */
+    case ESP_RST_BROWNOUT: /* Напряжение просело ниже порога, чип сам ушёл в сброс. */
+        return "просадка питания"; /* Фраза для монитора. */
+    case ESP_RST_USB: /* Перезагрузка пришла со стороны USB. */
+        return "USB"; /* Фраза для монитора. */
+    default: /* Код есть в перечислении, но эта ветка его не называет. */
+        return "неизвестная причина"; /* Чтобы лог не остался пустым на незнакомой причине. */
     }
 }
 
-void app_main(void)
+void app_main(void) /* Точка входа. Сначала покажем прошлую причину, потом сами доведём сторож до срабатывания. */
 {
     /* Читается один раз в начале: причина относится к загрузке, которая уже произошла. */
-    esp_reset_reason_t reason = esp_reset_reason();
-    ESP_LOGI(TAG, "причина этой загрузки: %s (%d)", reset_reason_text(reason), (int)reason);
+    esp_reset_reason_t reason = esp_reset_reason(); /* Прочитать причину один раз. Она относится к загрузке, которая уже произошла. */
+    ESP_LOGI(TAG, "причина этой загрузки: %s (%d)", reset_reason_text(reason), (int)reason); /* Текст и сырой номер. После срабатывания сторожа здесь будет «сторож задач». */
 
     /*
      * NULL означает «подписать текущую задачу», то есть main.
      * Пока задача подписана, она обязана регулярно вызывать esp_task_wdt_reset.
      * Таймаут задан в sdkconfig.defaults: 3 секунды.
      */
-    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL)); /* Подписать текущую задачу: NULL значит main. Теперь её обязаны кормить чаще, чем раз в 3 секунды. */
 
-    for (int i = 1; i <= 5; i++) {
-        ESP_ERROR_CHECK(esp_task_wdt_reset());
-        ESP_LOGI(TAG, "цикл %d, сторож покормлен", i);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    for (int i = 1; i <= 5; i++) { /* Пять спокойных циклов, чтобы в мониторе было видно нормальную работу. */
+        ESP_ERROR_CHECK(esp_task_wdt_reset()); /* Сообщить сторожу, что задача жива. Таймер 3 секунды начинается заново. */
+        ESP_LOGI(TAG, "цикл %d, сторож покормлен", i); /* Подтвердить номер цикла. Пауза ниже короче таймаута, поэтому перезагрузки ещё нет. */
+        vTaskDelay(pdMS_TO_TICKS(1000)); /* Секунда сна. Это меньше 3 секунд, сторож не успевает сработать. */
     }
 
-    ESP_LOGW(TAG, "больше не кормлю сторож. Через ~3 с будет перезагрузка");
-    while (true) {
+    ESP_LOGW(TAG, "больше не кормлю сторож. Через ~3 с будет перезагрузка"); /* Предупредить, что дальше кормления не будет. */
+    while (true) { /* Бесконечный цикл без esp_task_wdt_reset. Именно он и должен перезагрузить чип. */
         /* Намеренно длинная пауза без esp_task_wdt_reset. */
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(1000)); /* Снова секунда сна, но сброса сторожа уже нет. Через несколько секунд сработает таймаут. */
     }
 }
