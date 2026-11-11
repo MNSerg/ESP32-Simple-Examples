@@ -7,10 +7,10 @@
  *   импульс короче порога — SHORT_STEPS шагов в одну сторону,
  *   импульс не короче порога — LONG_STEPS шагов в другую.
  *
- * DRV8833 — это два моста, а не драйвер с входами STEP/DIR.
- * Четыре вывода AIN1, AIN2, BIN1, BIN2 сами перебирают фазы
- * биполярного двигателя. Пятипроводный униполярный 28BYJ-48
- * напрямую к этим мостам не подходит.
+ * Драйвер — A4988. У него уже есть входы STEP и DIR.
+ * Программа не перебирает обмотки: нарастающий фронт STEP делает
+ * один шаг, уровень DIR выбирает сторону. Пятипроводный
+ * униполярный 28BYJ-48 к A4988 напрямую не подходит.
  *
  * SELF_TEST = 1 выдаёт с GPIO20 короткие и длинные импульсы.
  * Перемычка GPIO20 — GPIO4 позволяет проверить измерение без
@@ -22,268 +22,214 @@
 
 /*
  * Библиотеки:
- * driver/gpio.h — вход импульса, выходы мостов DRV8833, сон драйвера и nFAULT.
- * esp_log.h — печать ширины и того, сколько шагов выбрано. В прерывании лог запрещён.
- * esp_rom_sys.h — esp_rom_delay_us ждёт микросекунды между фазами двигателя.
- *   vTaskDelay здесь груб: один тик FreeRTOS — это 10 мс, а шаг длится 2 мс.
+ * driver/gpio.h — вход импульса и выходы STEP, DIR, ENABLE, SLEEP, RESET, MS1, MS2.
+ * esp_log.h — печать ширины и числа шагов. В прерывании лог запрещён.
+ * esp_rom_sys.h — esp_rom_delay_us держит импульс STEP единицы микросекунд.
+ *   vTaskDelay здесь груб: один тик FreeRTOS — это 10 мс.
  * esp_timer.h — esp_timer_get_time в прерывании даёт время в микросекундах.
- *   Разница фронта и спада — ширина импульса.
  * freertos/FreeRTOS.h, queue.h, task.h — очередь из прерывания в задачу,
- *   которая уже крутит двигатель. В прерывании двигатель не шагают.
+ *   которая уже выдаёт шаги. В прерывании двигатель не крутят.
  */
-#include "driver/gpio.h"
-#include "esp_log.h"
-#include "esp_rom_sys.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
+#include "driver/gpio.h"           /* Номера GPIO и функции gpio_config / gpio_set_level. */
+#include "esp_log.h"               /* ESP_LOGI и ESP_LOGE пишут строки в монитор. */
+#include "esp_rom_sys.h"           /* esp_rom_delay_us: пауза короче одного тика FreeRTOS. */
+#include "esp_timer.h"             /* esp_timer_get_time: микросекунды, вызов допустим из прерывания. */
+#include "freertos/FreeRTOS.h"     /* Базовые типы планировщика. Подключается до queue.h и task.h. */
+#include "freertos/queue.h"        /* Очередь ширин импульса из прерывания в задачу двигателя. */
+#include "freertos/task.h"         /* xTaskCreate запускает задачу шагов и задачу тестовых импульсов. */
 
-static const char *TAG = "step";
+static const char *TAG = "step"; /* Подпись строк монитора: в скобках будет «step». */
 
-#define PULSE_GPIO GPIO_NUM_4
-#define TEST_GPIO GPIO_NUM_20
-#define AIN1_GPIO GPIO_NUM_7
-#define AIN2_GPIO GPIO_NUM_10
-#define BIN1_GPIO GPIO_NUM_1
-#define BIN2_GPIO GPIO_NUM_3
-#define NSLEEP_GPIO GPIO_NUM_21
-#define NFAULT_GPIO GPIO_NUM_0
+#define PULSE_GPIO GPIO_NUM_4     /* Сюда приходит измеряемый импульс, подтяжка к земле. */
+#define TEST_GPIO GPIO_NUM_20     /* Отсюда пример сам выдаёт импульсы, если SELF_TEST равен 1. */
+#define STEP_GPIO GPIO_NUM_7      /* Нарастающий фронт на STEP заставляет A4988 сделать один шаг. */
+#define DIR_GPIO GPIO_NUM_10      /* Уровень DIR выбирает направление до фронта STEP. */
+#define NENABLE_GPIO GPIO_NUM_1   /* ENABLE у A4988 активен нулём: 0 включает выходы, 1 отпускает обмотки. */
+#define NSLEEP_GPIO GPIO_NUM_3    /* SLEEP активен нулём: 1 держит драйвер бодрствующим. */
+#define NRESET_GPIO GPIO_NUM_21   /* RESET активен нулём: 1 разрешает внутренний счётчик шагов. */
+#define MS1_GPIO GPIO_NUM_5       /* Вместе с MS2 выбирает дробление шага. */
+#define MS2_GPIO GPIO_NUM_6       /* Второй вывод дробления. MS3 этот пример не трогает. */
 
-#define THRESHOLD_US 1000
-#define SHORT_STEPS 32
-#define LONG_STEPS 200
-#define STEP_INTERVAL_US 2000
-#define GLITCH_US 100
-#define STUCK_US 500000
-#define SELF_TEST 1
+#define THRESHOLD_US 1000         /* Порог ширины. Ниже — короткая серия, не ниже — длинная. */
+#define SHORT_STEPS 32            /* Сколько шагов сделать, если импульс короче порога. */
+#define LONG_STEPS 200            /* Сколько шагов сделать, если импульс не короче порога. */
+#define STEP_HIGH_US 10           /* Сколько микросекунд держать STEP в единице. Даташит просит не меньше 1. */
+#define STEP_INTERVAL_US 2000     /* Пауза между шагами. За это время мотор успевает сдвинуться. */
+#define DIR_SETUP_US 10           /* Пауза после смены DIR и до первого фронта STEP. Даташит просит доли микросекунды. */
+#define GLITCH_US 100             /* Короче этого импульс считается помехой. */
+#define STUCK_US 500000           /* Длиннее этого уровень считается застрявшим, а не импульсом. */
+#define MS1_LEVEL 0               /* 0. Вместе с MS2_LEVEL 0 и MS3 на земле это полный шаг. */
+#define MS2_LEVEL 0               /* 0. Единица только на MS1 дала бы половину шага. */
+#define SELF_TEST 1               /* 1 — пример сам генерирует импульсы на GPIO20. 0 — ждёт внешний сигнал. */
 
-/*
- * Полный шаг, обе фазы включены.
- * Никогда не ставить 1 на оба входа одного моста: AIN1 и AIN2,
- * либо BIN1 и BIN2. Так выходы драйвера замыкаются друг на друга.
- * Индекс растёт — вал крутится в одну сторону. Поменять местами
- * провода одной обмотки — направление станет обратным.
- */
-static const int STEP_SEQ[4][4] = {
-    {1, 0, 1, 0},
-    {0, 1, 1, 0},
-    {0, 1, 0, 1},
-    {1, 0, 0, 1},
-};
+static QueueHandle_t s_pulses;    /* Очередь: элемент — ширина импульса в микросекундах. */
+static volatile uint32_t s_dropped; /* Сколько импульсов не влезло в очередь. Пишет прерывание, читает задача. */
+static int64_t s_rise_us;         /* Момент переднего фронта. Нужен только обработчику. */
+static bool s_level_high;         /* true, пока импульс ещё не закончился. Защита от спада без фронта. */
 
-static QueueHandle_t s_pulses;
-static volatile uint32_t s_dropped;
-static int64_t s_rise_us;
-static bool s_level_high;
-static int s_phase;
-
-static void IRAM_ATTR pulse_isr(void *arg)
+static void IRAM_ATTR pulse_isr(void *arg) /* Обработчик любого фронта GPIO4. IRAM_ATTR держит его в ОЗУ. */
 {
-    (void)arg;
-    /* Время с запуска чипа. Вызов можно делать из прерывания, ESP_LOGI — нельзя. */
-    int64_t now = esp_timer_get_time();
-    /* Уровень после фронта: 1 — импульс начался, 0 — импульс кончился. */
-    int level = gpio_get_level(PULSE_GPIO);
+    (void)arg; /* Номер вывода нам не нужен: прерывание висит только на одном входе. */
 
-    if (level == 1) {
-        s_rise_us = now;
-        s_level_high = true;
-        return;
-    }
-    if (!s_level_high) {
-        return;
-    }
-    s_level_high = false;
+    int64_t now = esp_timer_get_time(); /* Микросекунды с запуска. Этот вызов из прерывания разрешён. */
+    int level = gpio_get_level(PULSE_GPIO); /* 1 — фронт вверх, 0 — фронт вниз. */
 
-    int64_t width = now - s_rise_us;
-    if (width < 0) {
-        return;
+    if (level == 1) {              /* Импульс начался. */
+        s_rise_us = now;           /* Запоминаем начало, ширину посчитаем на спаде. */
+        s_level_high = true;       /* Теперь спад будет иметь пару. */
+        return;                    /* До спада в очередь класть нечего. */
     }
-    BaseType_t wake = pdFALSE;
-    /*
-     * FromISR не ждёт свободного места. Если очередь полна, импульс теряется,
-     * а счётчик потом напечатает задача. Третий аргумент сообщает, надо ли
-     * сразу отдать процессор задаче двигателя.
-     */
-    if (xQueueSendFromISR(s_pulses, &width, &wake) != pdTRUE) {
-        s_dropped++;
+    if (!s_level_high) {           /* Спад без предыдущего фронта, например уровень уже был 0 на старте. */
+        return;                    /* Такой спад ширины не имеет. */
     }
-    /* Если задача двигателя важнее текущей, переключиться на неё сразу. */
-    portYIELD_FROM_ISR(wake);
+    s_level_high = false;          /* Импульс закончился, следующий должен снова начаться с фронта. */
+
+    int64_t width = now - s_rise_us; /* Ширина в микросекундах. */
+    if (width < 0) {               /* Защита на случай, если время шагнуло назад. Так быть не должно. */
+        return;                    /* Отрицательную ширину в очередь не кладём. */
+    }
+    BaseType_t wake = pdFALSE;     /* Сюда FromISR запишет, нужно ли сразу переключить задачу. */
+    if (xQueueSendFromISR(s_pulses, &width, &wake) != pdTRUE) { /* Не ждёт места. Не влезло — вернуло не pdTRUE. */
+        s_dropped++;               /* Задача потом напишет, сколько измерений потеряно. */
+    }
+    portYIELD_FROM_ISR(wake);      /* Если задача двигателя важнее, отдать ей процессор сразу. */
 }
 
-static void coils_write(int ain1, int ain2, int bin1, int bin2)
+static void step_pulse(void)       /* Один нарастающий фронт STEP: A4988 сдвигает вал на один шаг. */
 {
-    /*
-     * Четыре входа DRV8833. Пара AIN — первая обмотка, пара BIN — вторая.
-     * Единица на входе включает соответствующий выход моста.
-     */
-    gpio_set_level(AIN1_GPIO, ain1);
-    gpio_set_level(AIN2_GPIO, ain2);
-    gpio_set_level(BIN1_GPIO, bin1);
-    gpio_set_level(BIN2_GPIO, bin2);
+    gpio_set_level(STEP_GPIO, 1);  /* Фронт. Драйвер делает шаг по переходу 0 → 1, не по уровню. */
+    esp_rom_delay_us(STEP_HIGH_US); /* Держим единицу дольше минимума из даташита, чтобы фронт был чистым. */
+    gpio_set_level(STEP_GPIO, 0);  /* Возвращаем линию в ноль и готовим следующий фронт. */
+    esp_rom_delay_us(STEP_INTERVAL_US); /* Ждём, пока ротор дойдёт до нового положения. */
 }
 
-static void coils_off(void)
+static void move_steps(int steps, int dir_level) /* steps — сколько фронтов, dir_level — 0 или 1 на DIR. */
 {
-    coils_write(0, 0, 0, 0);
-}
+    gpio_set_level(DIR_GPIO, dir_level); /* Сторона выбирается уровнем, а не отдельным импульсом. */
+    esp_rom_delay_us(DIR_SETUP_US); /* DIR должен устояться до первого фронта STEP. */
 
-static void step_once(int direction)
-{
-    /*
-     * direction равен +1 или -1. Прибавка 4 перед остатком не даёт отрицательному
-     * индексу уйти в минус: в Си остаток от отрицательного числа тоже отрицательный.
-     */
-    s_phase = (s_phase + direction + 4) % 4;
-    const int *row = STEP_SEQ[s_phase];
-    coils_write(row[0], row[1], row[2], row[3]);
-    esp_rom_delay_us(STEP_INTERVAL_US);
-}
+    gpio_set_level(NSLEEP_GPIO, 1); /* Единица будит драйвер. Ноль усыпил бы его и сбросил шаг. */
+    gpio_set_level(NRESET_GPIO, 1); /* Единица отпускает внутренний сброс переводчика шагов. */
+    gpio_set_level(NENABLE_GPIO, 0); /* Ноль включает силовые выходы, в обмотки идёт ток. */
 
-static void move_steps(int steps, int direction)
-{
-    if (gpio_get_level(NFAULT_GPIO) == 0) {
-        ESP_LOGE(TAG, "nFAULT = 0, драйвер сообщает аварию, шаги пропущены");
-        coils_off();
-        return;
+    for (int i = 0; i < steps; i++) { /* Один проход цикла — один шаг двигателя. */
+        step_pulse();              /* Фронт STEP и пауза до следующего. */
     }
 
-    /* Единица на nSLEEP выводит драйвер из сна. Пока здесь ноль, выходы мостов выключены. */
-    gpio_set_level(NSLEEP_GPIO, 1);
-    for (int i = 0; i < steps; i++) {
-        step_once(direction);
-        if (gpio_get_level(NFAULT_GPIO) == 0) {
-            ESP_LOGE(TAG, "nFAULT стал 0 на шаге %d, движение остановлено", i);
-            break;
-        }
-    }
-    /* После хода обмотки отпускаем: вал свободен, драйвер меньше греется. */
-    coils_off();
+    gpio_set_level(NENABLE_GPIO, 1); /* Единица выключает выходы: вал свободен, драйвер меньше греется. */
 }
 
-static void stepper_task(void *arg)
+static void stepper_task(void *arg) /* Задача забирает ширины из очереди и решает, сколько шагов выдать. */
 {
-    (void)arg;
-    int64_t width = 0;
-    uint32_t seen_drops = 0;
+    (void)arg;                     /* xTaskCreate передала NULL, аргумент задачи не используется. */
+    int64_t width = 0;             /* Сюда xQueueReceive положит ширину очередного импульса. */
+    uint32_t seen_drops = 0;       /* Сколько потерь мы уже напечатали, чтобы не повторять старые. */
 
-    while (1) {
-        if (xQueueReceive(s_pulses, &width, portMAX_DELAY) != pdTRUE) {
-            continue;
+    while (1) {                    /* Задача живёт всё время работы программы. */
+        if (xQueueReceive(s_pulses, &width, portMAX_DELAY) != pdTRUE) { /* Спим, пока прерывание не пришлёт ширину. */
+            continue;              /* portMAX_DELAY почти не возвращает ошибку. Если вернул — ждём снова. */
         }
 
-        uint32_t drops = s_dropped;
-        if (drops != seen_drops) {
-            ESP_LOGW(TAG, "очередь была полна, отброшено импульсов: %" PRIu32, drops - seen_drops);
-            seen_drops = drops;
+        uint32_t drops = s_dropped; /* Копия счётчика: его пишет прерывание, читаем один раз. */
+        if (drops != seen_drops) { /* Появились новые отброшенные импульсы. */
+            ESP_LOGW(TAG, "очередь была полна, отброшено импульсов: %" PRIu32, drops - seen_drops); /* Печатаем разницу. */
+            seen_drops = drops;    /* Запоминаем, чтобы следующий раз печатать только новые потери. */
         }
 
-        if (width < GLITCH_US) {
-            ESP_LOGI(TAG, "импульс %" PRId64 " мкс короче %d, это помеха", width, GLITCH_US);
-            continue;
+        if (width < GLITCH_US) {   /* Слишком коротко для настоящего сигнала. */
+            ESP_LOGI(TAG, "импульс %" PRId64 " мкс короче %d, это помеха", width, GLITCH_US); /* В лог, мотор не трогаем. */
+            continue;              /* К шагам не переходим. */
         }
-        if (width > STUCK_US) {
-            ESP_LOGW(TAG, "импульс %" PRId64 " мкс длиннее %d мс, уровень застрял", width, STUCK_US / 1000);
-            continue;
+        if (width > STUCK_US) {    /* Уровень слишком долго держался в единице. */
+            ESP_LOGW(TAG, "импульс %" PRId64 " мкс длиннее %d мс, уровень застрял", width, STUCK_US / 1000); /* Предупреждение. */
+            continue;              /* Это не импульс, а залипший провод. */
         }
 
-        if (width >= THRESHOLD_US) {
-            ESP_LOGI(TAG, "%" PRId64 " мкс >= %d, %d шагов вперёд", width, THRESHOLD_US, LONG_STEPS);
-            move_steps(LONG_STEPS, +1);
-        } else {
-            ESP_LOGI(TAG, "%" PRId64 " мкс < %d, %d шагов назад", width, THRESHOLD_US, SHORT_STEPS);
-            move_steps(SHORT_STEPS, -1);
+        if (width >= THRESHOLD_US) { /* Порог пересечён или равен ему: длинная серия. */
+            ESP_LOGI(TAG, "%" PRId64 " мкс >= %d, %d шагов вперёд", width, THRESHOLD_US, LONG_STEPS); /* Что решили. */
+            move_steps(LONG_STEPS, 1); /* DIR = 1. Если вал крутится не туда, поменяйте 1 и 0 местами. */
+        } else {                   /* Порог не пересечён: короткая серия в другую сторону. */
+            ESP_LOGI(TAG, "%" PRId64 " мкс < %d, %d шагов назад", width, THRESHOLD_US, SHORT_STEPS); /* Что решили. */
+            move_steps(SHORT_STEPS, 0); /* DIR = 0, шагов меньше. */
         }
     }
 }
 
-#if SELF_TEST
-static void pulse_out(uint32_t width_us)
+#if SELF_TEST                    /* Блок ниже попадает в прошивку только когда SELF_TEST равен 1. */
+static void pulse_out(uint32_t width_us) /* Выдать на GPIO20 один импульс заданной ширины. */
 {
-    gpio_set_level(TEST_GPIO, 1); /* Фронт, с которого измерение начинает считать ширину. */
-    esp_rom_delay_us(width_us);   /* Держать единицу ровно заданное число микросекунд. */
-    gpio_set_level(TEST_GPIO, 0); /* Спад. Прерывание на GPIO4 посчитает разницу. */
+    gpio_set_level(TEST_GPIO, 1); /* Фронт. Если GPIO20 соединён с GPIO4, измерение его увидит. */
+    esp_rom_delay_us(width_us);   /* Держим единицу ровно запрошенные микросекунды. */
+    gpio_set_level(TEST_GPIO, 0); /* Спад. Обработчик GPIO4 посчитает разницу времён. */
 }
 
-static void generator_task(void *arg)
+static void generator_task(void *arg) /* Раз в 2.5 с чередует короткий и длинный тестовый импульс. */
 {
-    (void)arg;
-    bool long_pulse = false;
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(2500));
-        uint32_t width = long_pulse ? 1500 : 400;
-        long_pulse = !long_pulse;
-        pulse_out(width);
-        ESP_LOGI(TAG, "тест: на GPIO%d выдан импульс %" PRIu32 " мкс", TEST_GPIO, width);
+    (void)arg;                    /* Аргумент задачи не используется. */
+    bool long_pulse = false;      /* false — следующий импульс короткий, true — длинный. */
+    while (1) {                   /* Генератор работает параллельно с задачей двигателя. */
+        vTaskDelay(pdMS_TO_TICKS(2500)); /* Пауза длиннее серии шагов, чтобы движения не наложились. */
+        uint32_t width = long_pulse ? 1500 : 400; /* 400 мкс ниже порога 1000, 1500 мкс выше. */
+        long_pulse = !long_pulse; /* В следующий раз выдать другую ширину. */
+        pulse_out(width);         /* Сам импульс. Измерение произойдёт в прерывании, если есть перемычка. */
+        ESP_LOGI(TAG, "тест: на GPIO%d выдан импульс %" PRIu32 " мкс", TEST_GPIO, width); /* Подтверждение в монитор. */
     }
 }
-#endif
+#endif                           /* Конец куска, который попадает в прошивку только при SELF_TEST 1. */
 
-static void output_low(gpio_num_t pin)
+static void output_level(gpio_num_t pin, int level) /* Настроить вывод как выход и сразу поставить уровень. */
 {
-    gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << pin,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    gpio_config_t cfg = {         /* Одна структура описывает режим вывода. */
+        .pin_bit_mask = 1ULL << pin, /* Бит с номером вывода. 1ULL нужен, чтобы маска была 64-битной. */
+        .mode = GPIO_MODE_OUTPUT, /* Вывод сам задаёт 0 или 1, а не читает чужой сигнал. */
+        .pull_up_en = GPIO_PULLUP_DISABLE, /* Выходу внутренняя подтяжка не нужна. */
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, /* И подтяжка к земле тоже. */
+        .intr_type = GPIO_INTR_DISABLE, /* На выходе нет события, прерывание выключено. */
     };
-    ESP_ERROR_CHECK(gpio_config(&cfg));
-    gpio_set_level(pin, 0);
+    ESP_ERROR_CHECK(gpio_config(&cfg)); /* Если вывод не настроился, останавливаемся: молча шагать нельзя. */
+    gpio_set_level(pin, level);   /* Сразу нужный уровень, чтобы вывод не остался в случайном состоянии. */
 }
 
-void app_main(void)
+void app_main(void)               /* Точка входа. ESP-IDF вызывает её уже внутри задачи main. */
 {
-    /* Сначала обмотки выключены, и только потом драйвер выходит из сна. */
-    output_low(AIN1_GPIO);
-    output_low(AIN2_GPIO);
-    output_low(BIN1_GPIO);
-    output_low(BIN2_GPIO);
-    output_low(NSLEEP_GPIO);
-    /* Сначала все входы мостов уже в нуле, и только потом драйвер выходит из сна. */
-    gpio_set_level(NSLEEP_GPIO, 1);
+    output_level(STEP_GPIO, 0);   /* STEP в нуле: фронта ещё нет, лишнего шага при включении не будет. */
+    output_level(DIR_GPIO, 0);    /* Направление по умолчанию. До первого импульса мотор всё равно обесточен. */
+    output_level(MS1_GPIO, MS1_LEVEL); /* Режим дробления, первая линия. */
+    output_level(MS2_GPIO, MS2_LEVEL); /* Режим дробления, вторая линия. MS3 должен быть на земле. */
+    output_level(NENABLE_GPIO, 1); /* Сначала выходы выключены. Потом уже будем будить драйвер. */
+    output_level(NSLEEP_GPIO, 1); /* Драйвер бодрствует, но обмотки ещё отпущены единицей на ENABLE. */
+    output_level(NRESET_GPIO, 1); /* Сброс снят. Если RESET на модуле связан с SLEEP, этот вывод можно не подключать. */
 
-    gpio_config_t fault = {
-        .pin_bit_mask = 1ULL << NFAULT_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    gpio_config_t pulse = {       /* Вход измеряемого импульса. */
+        .pin_bit_mask = 1ULL << PULSE_GPIO, /* Только GPIO4. */
+        .mode = GPIO_MODE_INPUT,  /* Читаем чужой сигнал, свой уровень не выдаём. */
+        .pull_up_en = GPIO_PULLUP_DISABLE, /* К питанию не тянем: покоем должна быть земля. */
+        .pull_down_en = GPIO_PULLDOWN_ENABLE, /* Пока импульса нет, вход читается нулём, а не шумом. */
+        .intr_type = GPIO_INTR_ANYEDGE, /* Прерывание и на фронт, и на спад: так меряется ширина. */
     };
-    ESP_ERROR_CHECK(gpio_config(&fault));
+    ESP_ERROR_CHECK(gpio_config(&pulse)); /* Без этого входа измерять нечего. */
 
-    gpio_config_t pulse = {
-        .pin_bit_mask = 1ULL << PULSE_GPIO,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&pulse));
-
-    s_pulses = xQueueCreate(4, sizeof(int64_t));
-    if (s_pulses == NULL) {
-        ESP_LOGE(TAG, "не удалось создать очередь импульсов");
-        return;
+    s_pulses = xQueueCreate(4, sizeof(int64_t)); /* Четыре ширины. Пятая, пока задача занята шагами, будет отброшена. */
+    if (s_pulses == NULL) {       /* Очередь не создалась: не хватило кучи. */
+        ESP_LOGE(TAG, "не удалось создать очередь импульсов"); /* Пишем причину и выходим. */
+        return;                   /* Задачу двигателя без очереди запускать нельзя. */
     }
 
-    ESP_ERROR_CHECK(gpio_install_isr_service(0));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(PULSE_GPIO, pulse_isr, NULL));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0)); /* Общий диспетчер прерываний GPIO. Аргумент 0 — без особых флагов. */
+    ESP_ERROR_CHECK(gpio_isr_handler_add(PULSE_GPIO, pulse_isr, NULL)); /* Повесить наш обработчик на GPIO4. */
 
-    if (xTaskCreate(stepper_task, "stepper", 3072, NULL, 5, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "не удалось создать задачу двигателя");
-        return;
+    if (xTaskCreate(stepper_task, "stepper", 3072, NULL, 5, NULL) != pdPASS) { /* Стек 3072 байта, приоритет выше main. */
+        ESP_LOGE(TAG, "не удалось создать задачу двигателя"); /* Создание не удалось. */
+        return;                   /* Без задачи шаги всё равно никто не выдаст. */
     }
 
-#if SELF_TEST
-    output_low(TEST_GPIO);
-    if (xTaskCreate(generator_task, "pulse", 2048, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "не удалось создать генератор импульсов");
+#if SELF_TEST                    /* Генератор нужен только в режиме самопроверки. */
+    output_level(TEST_GPIO, 0);  /* Тестовый выход в нуле, пока задача не выдала импульс. */
+    if (xTaskCreate(generator_task, "pulse", 2048, NULL, 3, NULL) != pdPASS) { /* Приоритет ниже задачи двигателя. */
+        ESP_LOGE(TAG, "не удалось создать генератор импульсов"); /* Сама задача двигателя при этом уже работает. */
     }
-    ESP_LOGI(TAG, "самопроверка: соедините GPIO%d и GPIO%d", TEST_GPIO, PULSE_GPIO);
-#else
-    ESP_LOGI(TAG, "внешний импульс на GPIO%d, порог %d мкс", PULSE_GPIO, THRESHOLD_US);
+    ESP_LOGI(TAG, "самопроверка: соедините GPIO%d и GPIO%d", TEST_GPIO, PULSE_GPIO); /* Что перемкнуть на плате. */
+#else                            /* Внешний источник. GPIO20 выходом не делаем, чтобы не спорить с чужим сигналом. */
+    ESP_LOGI(TAG, "внешний импульс на GPIO%d, порог %d мкс", PULSE_GPIO, THRESHOLD_US); /* Куда подать сигнал. */
 #endif
 }

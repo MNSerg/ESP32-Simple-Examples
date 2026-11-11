@@ -86,7 +86,7 @@ static void ap_start(void) /* Раздать сеть, в которой тел�
             .channel = 1, /* Канал 1 в диапазоне 2.4 ГГц. */
             .max_connection = 4, /* До четырёх клиентов, телефону этого достаточно. */
             .authmode = WIFI_AUTH_WPA2_PSK, /* Сеть с паролем WPA2. */
-        },
+        }, /* Конец полей точки доступа. */
     };
     strncpy((char *)config.ap.ssid, AP_SSID, sizeof(config.ap.ssid) - 1); /* Имя сети в массив ssid, последний байт остаётся нулём. */
     strncpy((char *)config.ap.password, AP_PASS, sizeof(config.ap.password) - 1); /* Пароль в массив password с тем же запасом под ноль. */

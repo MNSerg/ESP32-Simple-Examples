@@ -22,33 +22,33 @@
  *   включить и прочитать градусы. Это не внешний датчик на I2C.
  * esp_log.h — печать температуры. На дисплей пример ничего не выводит.
  */
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/temperature_sensor.h"
-#include "esp_log.h"
+#include "freertos/FreeRTOS.h" /* Типы планировщика, нужен до task.h. */
+#include "freertos/task.h"     /* vTaskDelay делает паузу в одну секунду между измерениями. */
+#include "driver/temperature_sensor.h" /* Установить, включить и прочитать внутренний датчик кристалла. */
+#include "esp_log.h"           /* Печать градусов в монитор. На дисплей этот пример не пишет. */
 
-static const char *TAG = "temp";
+static const char *TAG = "temp"; /* Подпись строк монитора. */
 
-void app_main(void)
+void app_main(void) /* Точка входа, её вызывает ESP-IDF. */
 {
-    temperature_sensor_handle_t sensor = NULL;
+    temperature_sensor_handle_t sensor = NULL; /* Ручка датчика. Пока NULL: датчик ещё не установлен. */
     /*
      * Макрос заполняет структуру окном 10…50 °C. Драйвер по окну выбирает
      * внутренние коэффициенты. Это ожидаемый диапазон, не ограничение вывода.
      */
-    temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
+    temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50); /* Окно 10…50 °C выбирает коэффициенты драйвера. */
     /* install готовит датчик и отдаёт ручку. Измерять ещё нельзя. */
-    ESP_ERROR_CHECK(temperature_sensor_install(&config, &sensor));
+    ESP_ERROR_CHECK(temperature_sensor_install(&config, &sensor)); /* Подготовить датчик и записать ручку в sensor. */
     /* enable включает измерение. После этого get_celsius возвращает градусы. */
-    ESP_ERROR_CHECK(temperature_sensor_enable(sensor));
-    ESP_LOGI(TAG, "датчик включён, окно %d…%d °C. Это температура кристалла",
-             10, 50);
+    ESP_ERROR_CHECK(temperature_sensor_enable(sensor)); /* Включить измерение. До этого get_celsius вызывать рано. */
+    ESP_LOGI(TAG, "датчик включён, окно %d…%d °C. Это температура кристалла", /* Напоминание, что это не воздух в комнате. */
+             10, 50); /* Те же границы, что в макросе выше. */
 
-    while (true) {
-        float celsius = 0.0f;
+    while (true) { /* Измерять, пока плата включена. */
+        float celsius = 0.0f; /* Сюда драйвер запишет градусы. Ноль — только начальное значение. */
         /* Один отсчёт. Функция сама дожидается готовности датчика. */
-        ESP_ERROR_CHECK(temperature_sensor_get_celsius(sensor, &celsius));
-        ESP_LOGI(TAG, "%.2f °C", celsius);
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        ESP_ERROR_CHECK(temperature_sensor_get_celsius(sensor, &celsius)); /* Один отсчёт. Функция сама ждёт готовности датчика. */
+        ESP_LOGI(TAG, "%.2f °C", celsius); /* Два знака после запятой: датчик шумит на десятые доли. */
+        vTaskDelay(pdMS_TO_TICKS(1000)); /* Секунда паузы. Задача спит и не греет кристалл лишним циклом. */
     }
 }

@@ -45,7 +45,7 @@
 | [22_pm_auto_light_sleep](examples/22_pm_auto_light_sleep/README.md) | Автоматический лёгкий сон |
 | [display/01_flexible_menu](examples/display/01_flexible_menu/README.md) | Меню на OLED через u8g2 |
 | [display/02_system_status](examples/display/02_system_status/README.md) | Характеристики чипа на OLED |
-| [23_pulse_stepper](examples/23_pulse_stepper/README.md) | Длительность импульса и шаговик DRV8833 |
+| [23_pulse_stepper](examples/23_pulse_stepper/README.md) | Длительность импульса и шаговик A4988 |
 | [24_i2c_transfer](examples/24_i2c_transfer/README.md) | Запись и чтение I2C, разбор ошибок |
 
 Раздел дисплея собран отдельно: [examples/display/README.md](examples/display/README.md). Общий указатель с командами сборки: [examples/README.md](examples/README.md).

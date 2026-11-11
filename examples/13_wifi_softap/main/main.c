@@ -91,7 +91,7 @@ static void ap_start(void) /* Собрать точку доступа и вкл
             .channel = AP_CHANNEL,             /* Канал 1…13 диапазона 2.4 ГГц. Телефон должен его видеть. */
             .max_connection = AP_MAX_CLIENTS,  /* Сколько клиентов пускать одновременно. */
             .authmode = WIFI_AUTH_WPA2_PSK,    /* Сеть с паролем. Для открытой сети пароль не задают. */
-        },
+        }, /* Конец описания точки доступа внутри wifi_config_t. */
     };
     strncpy((char *)config.ap.ssid, AP_SSID, sizeof(config.ap.ssid) - 1); /* Имя сети в массив ssid. Минус 1 оставляет место под ноль. */
     strncpy((char *)config.ap.password, AP_PASS, sizeof(config.ap.password) - 1); /* Пароль в массив password тем же способом. */

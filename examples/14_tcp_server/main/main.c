@@ -73,7 +73,7 @@ static void ap_start(void) /* Поднять свою точку доступа,
             .channel = 1, /* Канал 1 диапазона 2.4 ГГц. Его видит обычный ноутбук. */
             .max_connection = 4, /* Не больше четырёх клиентов одновременно. */
             .authmode = WIFI_AUTH_WPA2_PSK, /* Сеть закрыта паролем WPA2. */
-        },
+        }, /* Конец полей точки доступа. */
     };
     strncpy((char *)config.ap.ssid, AP_SSID, sizeof(config.ap.ssid) - 1); /* Имя сети в массив ssid, с местом под завершающий ноль. */
     strncpy((char *)config.ap.password, AP_PASS, sizeof(config.ap.password) - 1); /* Пароль в массив password тем же ограничением длины. */
