@@ -15,8 +15,15 @@
  * вывод на землю. Здесь используется та же схема.
  */
 
-#include <stdbool.h>
+#include <stdbool.h> /* bool — «кнопка зажата» и «светодиод горит» удобнее хранить так. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и freertos/task.h — сон задачи на время антидребезга.
+ *   Опрос кнопки не должен жечь процессор в пустом цикле.
+ * driver/gpio.h — два вывода: GPIO9 читаем как вход, GPIO8 держим как выход.
+ * esp_log.h — печатать номер нажатия в монитор.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -32,10 +39,12 @@
 /* Сколько ждать, пока контакты кнопки перестанут дребезжать. */
 #define DEBOUNCE_MS 30
 
+/* Имя модуля в скобках у каждой строки монитора. */
 static const char *TAG = "button_poll";
 
 static void led_set(bool on)
 {
+    /* LED_ON_LEVEL учитывает платы, где светодиод горит нулём, а не единицей. */
     int level = on ? LED_ON_LEVEL : (1 - LED_ON_LEVEL);
     gpio_set_level(LED_GPIO, level);
 }
@@ -43,6 +52,7 @@ static void led_set(bool on)
 /* Кнопка замыкает вывод на землю, поэтому «нажато» — это уровень 0. */
 static bool button_is_down(void)
 {
+    /* gpio_get_level читает вывод прямо сейчас: 0 или 1, без ожидания. */
     return gpio_get_level(BUTTON_GPIO) == 0;
 }
 
@@ -60,8 +70,10 @@ void app_main(void)
          */
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        /* Опрос сам читает уровень, аппаратное прерывание здесь не включаем. */
         .intr_type = GPIO_INTR_DISABLE,
     };
+    /* Если настройка вывода не удалась, дальше читать кнопку бессмысленно. */
     ESP_ERROR_CHECK(gpio_config(&button));
 
     gpio_config_t led = {
@@ -82,8 +94,8 @@ void app_main(void)
             /* Первое чтение могло попасть в дребезг. Ждём и читаем снова. */
             vTaskDelay(pdMS_TO_TICKS(DEBOUNCE_MS));
             if (button_is_down()) {
-                presses++;
-                led_on = !led_on;
+                presses++;          /* Счётчик только для журнала, на железо не влияет. */
+                led_on = !led_on;   /* Каждое подтверждённое нажатие переворачивает свет. */
                 led_set(led_on);
                 ESP_LOGI(TAG, "нажатие %d, светодиод %s",
                          presses, led_on ? "включён" : "выключен");

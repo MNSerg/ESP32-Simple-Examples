@@ -19,6 +19,16 @@
  * обычно 10 мс. Эти два таймера нужны, когда 10 мс уже много.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h, queue.h, task.h — очередь из прерывания GPTimer
+ *   в обычную задачу и сама эта задача.
+ * esp_timer.h — системный таймер с шагом 1 мкс. Здесь он тикает раз в секунду,
+ *   колбэк выполняется в задаче, поэтому из него можно писать в лог.
+ * driver/gptimer.h — отдельный аппаратный счётчик. Его колбэк — уже прерывание,
+ *   поэтому наружу он отдаёт только единицу через очередь.
+ * esp_log.h — печать. Из прерывания GPTimer её не вызывают.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -75,14 +85,20 @@ static void gptimer_print_task(void *arg)
 static void start_esp_timer(void)
 {
     const esp_timer_create_args_t args = {
-        .callback = esp_timer_callback,
-        .arg = NULL,
+        .callback = esp_timer_callback, /* Кого вызвать, когда период истечёт. */
+        .arg = NULL,                    /* Этот указатель пришёл бы в колбэк первым аргументом. */
         /* ESP_TIMER_TASK — колбэк в задаче. ESP_TIMER_ISR — колбэк прямо из прерывания. */
         .dispatch_method = ESP_TIMER_TASK,
-        .name = "second",
+        .name = "second", /* Имя видно в отладчике, на период не влияет. */
+        /*
+         * Если колбэк не успел отработать, а период уже кончился снова,
+         * пропущенный вызов не копят, а пропускают. Для счётчика «раз в секунду»
+         * это лучше, чем пачка догоняющих вызовов.
+         */
         .skip_unhandled_events = true,
     };
     esp_timer_handle_t timer = NULL;
+    /* esp_timer_create только описывает таймер. Счёт пойдёт после start_periodic. */
     ESP_ERROR_CHECK(esp_timer_create(&args, &timer));
     /* Период задаётся в микросекундах. 1000000 мкс = 1 с. */
     ESP_ERROR_CHECK(esp_timer_start_periodic(timer, 1000000));
@@ -91,8 +107,8 @@ static void start_esp_timer(void)
 static void start_gptimer(void)
 {
     gptimer_config_t config = {
-        .clk_src = GPTIMER_CLK_SRC_DEFAULT,
-        .direction = GPTIMER_COUNT_UP,
+        .clk_src = GPTIMER_CLK_SRC_DEFAULT, /* Источник такта выбирает драйвер. */
+        .direction = GPTIMER_COUNT_UP,      /* Счётчик растёт от нуля к порогу. */
         /* 1 МГц: одна единица счётчика равна 1 микросекунде. */
         .resolution_hz = 1000000,
     };
@@ -100,9 +116,10 @@ static void start_gptimer(void)
     ESP_ERROR_CHECK(gptimer_new_timer(&config, &timer));
 
     gptimer_alarm_config_t alarm = {
-        .reload_count = 0,
+        .reload_count = 0, /* После срабатывания счётчик прыгает сюда, то есть в ноль. */
         /* Срабатывание каждые 200000 мкс = 200 мс. */
         .alarm_count = 200000,
+        /* true — повторять порог, а не сработать один раз и замолчать. */
         .flags.auto_reload_on_alarm = true,
     };
     ESP_ERROR_CHECK(gptimer_set_alarm_action(timer, &alarm));

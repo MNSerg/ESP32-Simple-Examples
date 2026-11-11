@@ -22,6 +22,16 @@
  * только если probe получил ACK.
  */
 
+/*
+ * Библиотеки:
+ * driver/i2c_master.h — мастер I2C ESP-IDF 6. Из него пример берёт четыре операции:
+ *   создать шину, записать байты, прочитать байты и записать регистр с повторным
+ *   стартом. Отдельного «ведомого» здесь нет: на ESP32-C3 контроллер I2C один.
+ * esp_log.h — печатать и успех, и текст ошибки. Ошибки в этом примере ожидаемы,
+ *   поэтому их не прячут внутри ESP_ERROR_CHECK.
+ * freertos/FreeRTOS.h и task.h — пауза между циклами и короткое ожидание,
+ *   пока EEPROM заканчивает внутреннюю запись.
+ */
 #include "driver/i2c_master.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -89,10 +99,16 @@ static esp_err_t transfer_retry(i2c_master_dev_handle_t dev, const uint8_t *writ
     esp_err_t err = ESP_FAIL;
     for (int attempt = 1; attempt <= 3; attempt++) {
         if (write_len > 0 && read_len > 0) {
+            /*
+             * Сначала запись, потом чтение, между ними повторный старт.
+             * Шина не отпускается, поэтому устройство не забывает адрес регистра.
+             */
             err = i2c_master_transmit_receive(dev, write_data, write_len, read_data, read_len, XFER_TIMEOUT_MS);
         } else if (write_len > 0) {
+            /* Только запись. Таймаут в миллисекундах: сколько ждать конца обмена. */
             err = i2c_master_transmit(dev, write_data, write_len, XFER_TIMEOUT_MS);
         } else {
+            /* Только чтение. Мастер называет адрес с битом чтения и принимает байты. */
             err = i2c_master_receive(dev, read_data, read_len, XFER_TIMEOUT_MS);
         }
 
@@ -118,6 +134,10 @@ static bool add_device(uint16_t address, i2c_master_dev_handle_t *out)
         .device_address = address,
         .scl_speed_hz = I2C_FREQ_HZ,
     };
+    /*
+     * Регистрация не опрашивает микросхему. Адрес просто запоминается.
+     * NACK появится позже, когда по этому адресу пойдут байты.
+     */
     esp_err_t err = i2c_master_bus_add_device(s_bus, &cfg, out);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "не удалось зарегистрировать 0x%02X: %s", address, explain(err));
@@ -129,6 +149,7 @@ static bool add_device(uint16_t address, i2c_master_dev_handle_t *out)
 
 static bool probe_ok(uint16_t address)
 {
+    /* probe шлёт адрес на запись и смотрит ACK. Устройства заранее регистрировать не нужно. */
     esp_err_t err = i2c_master_probe(s_bus, address, XFER_TIMEOUT_MS);
     if (err == ESP_OK) {
         return true;
@@ -257,6 +278,7 @@ void app_main(void)
         .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
+    /* Включить контроллер. Успех здесь значит «выводы заняты мастером», а не «кто-то ответил». */
     esp_err_t err = i2c_new_master_bus(&bus, &s_bus);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "шина не открылась: %s. Проверьте GPIO5, GPIO6 и подтяжки к 3.3 В",

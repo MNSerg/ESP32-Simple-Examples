@@ -27,8 +27,17 @@
  * запустило эту загрузку.
  */
 
-#include <inttypes.h>
+#include <inttypes.h> /* PRIu32 печатает счётчик пробуждений типа uint32_t. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — короткая пауза перед сном, чтобы последняя
+ *   строка лога успела уйти в USB. Сам сон FreeRTOS не выполняет.
+ * esp_log.h — напечатать причину пробуждения. После глубокого сна программа
+ *   начинается заново, и эта строка — первое, что видно в мониторе.
+ * esp_sleep.h — таймер пробуждения, GPIO пробуждения и esp_deep_sleep_start.
+ *   Из этой функции управление не возвращается.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -59,7 +68,12 @@ static const char *cause_text(esp_sleep_wakeup_cause_t cause)
 
 void app_main(void)
 {
+    /*
+     * Плюс один к числу, которое лежит в RTC-памяти. Обычная глобальная
+     * переменная здесь обнулилась бы: загрузчик заново инициализирует память.
+     */
     s_wakeups++;
+    /* Причина относится к пробуждению, которое только что запустило эту загрузку. */
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     ESP_LOGI(TAG, "загрузка %" PRIu32 ", причина: %s (%d)",
              s_wakeups, cause_text(cause), (int)cause);

@@ -14,8 +14,20 @@
  * потом вызывает app_main() уже внутри задачи «main».
  */
 
-#include <stdbool.h>
+#include <stdbool.h> /* bool — тип «истина/ложь». Им удобно хранить «светодиод горит». */
 
+/*
+ * Библиотеки этого примера и зачем они здесь:
+ *
+ * freertos/FreeRTOS.h — типы планировщика (pdTRUE, pdMS_TO_TICKS).
+ *   Этот заголовок подключают первым: task.h без него не соберётся.
+ * freertos/task.h — vTaskDelay. Пауза, которая отдаёт процессор другим
+ *   задачам, а не крутит пустой цикл.
+ * driver/gpio.h — драйвер выводов. Здесь он делает GPIO выходом и ставит
+ *   на нём уровень 0 или 1, то есть гасит и зажигает светодиод.
+ * esp_log.h — ESP_LOGI пишет строку в монитор. Без него мигание было бы
+ *   видно только на светодиоде, а в журнале не было бы ни одной строки.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -42,12 +54,19 @@
  */
 #define LED_ON_LEVEL 0
 
+/* Подпись строк в мониторе: ESP_LOGI печатает её в скобках перед текстом. */
 static const char *TAG = "gpio_blink";
 
 /* Включить или выключить светодиод, не думая о полярности платы. */
 static void led_set(bool on)
 {
+    /*
+     * Если «включено» для этой платы — это уровень 0, то «выключено»
+     * получается как 1 - 0 = 1. При обычной полярности формула даёт
+     * ровно тот уровень, который передали.
+     */
     int level = on ? LED_ON_LEVEL : (1 - LED_ON_LEVEL);
+    /* gpio_set_level сразу меняет напряжение на выводе. 0 — земля, 1 — 3.3 В. */
     gpio_set_level(LED_GPIO, level);
 }
 
@@ -65,15 +84,22 @@ void app_main(void)
     gpio_config_t io = {
         .pin_bit_mask = 1ULL << LED_GPIO,
         .mode = GPIO_MODE_OUTPUT,
+        /* Выходу подтяжка не нужна: уровень и так задаёт сам вывод. */
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        /* Прерывание на выходе светодиода не нужно, входных событий нет. */
         .intr_type = GPIO_INTR_DISABLE,
     };
+    /*
+     * ESP_ERROR_CHECK проверяет код возврата. Если gpio_config вернула
+     * не ESP_OK, программа остановится и напишет, в каком месте. Так
+     * ошибка настройки не превращается в «светодиод молча не горит».
+     */
     ESP_ERROR_CHECK(gpio_config(&io));
 
     bool on = false;
     while (true) {
-        on = !on;
+        on = !on; /* Каждые полсекунды состояние меняется на противоположное. */
         led_set(on);
         ESP_LOGI(TAG, "светодиод %s", on ? "включён" : "выключен");
 

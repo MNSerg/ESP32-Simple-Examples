@@ -16,9 +16,16 @@
  * читают и пишут из разных задач, поэтому доступ закрыт мьютексом.
  */
 
-#include <inttypes.h>
-#include <stdio.h>
+#include <inttypes.h> /* PRIu32 для печати миллисекунд, которые лежат в uint32_t. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h — типы планировщика, подключается до queue.h, semphr.h и task.h.
+ * freertos/queue.h — очередь измерений: producer кладёт, consumer забирает.
+ * freertos/semphr.h — мьютекс. Им закрывают общий счётчик от одновременного доступа.
+ * freertos/task.h — xTaskCreate запускает три задачи, vTaskDelay задаёт их ритм.
+ * esp_log.h — печать из задач. У каждой строки будет подпись «tasks».
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -27,10 +34,10 @@
 
 static const char *TAG = "tasks";
 
-/* Одно «измерение», которое producer передаёт consumer. */
+/* Одно «измерение», которое producer передаёт consumer. Очередь копирует всю структуру. */
 typedef struct {
-    int value;
-    uint32_t time_ms;
+    int value;         /* Порядковый номер измерения, его увеличивает producer. */
+    uint32_t time_ms;  /* Сколько миллисекунд прошло с запуска планировщика. */
 } sample_t;
 
 static QueueHandle_t s_samples;
@@ -44,6 +51,11 @@ static void producer_task(void *arg)
     while (true) {
         sample_t sample = {
             .value = value,
+            /*
+             * xTaskGetTickCount — сколько тиков прошло с запуска FreeRTOS.
+             * portTICK_PERIOD_MS — длина одного тика в миллисекундах, обычно 10.
+             * Произведение — время в миллисекундах на момент отправки.
+             */
             .time_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
         };
         /*

@@ -21,10 +21,15 @@
  * то, что вы «уже записали».
  */
 
-#include <inttypes.h>
-#include <stdio.h>
-#include <string.h>
+#include <inttypes.h> /* PRId32 печатает число загрузок типа int32_t. */
+#include <stdio.h>    /* snprintf собирает текст заметки. */
 
+/*
+ * Библиотеки:
+ * esp_log.h — печать прочитанных значений.
+ * nvs.h — открыть пространство имён, прочитать и записать ключ, сбросить кэш на flash.
+ * nvs_flash.h — подготовить сам раздел flash. nvs.h работает уже внутри него.
+ */
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -48,9 +53,14 @@ void app_main(void)
     nvs_setup();
 
     nvs_handle_t handle;
+    /*
+     * nvs_open открывает пространство «storage» и на чтение, и на запись.
+     * Ручка handle дальше заменяет имя пространства во всех вызовах.
+     */
     ESP_ERROR_CHECK(nvs_open(NAMESPACE, NVS_READWRITE, &handle));
 
     int32_t boots = 0;
+    /* Прочитать прошлое значение. Ключа нет только при самом первом запуске. */
     esp_err_t err = nvs_get_i32(handle, "boots", &boots);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGI(TAG, "ключ boots ещё не создан, начинаю с нуля");
@@ -59,6 +69,7 @@ void app_main(void)
         ESP_ERROR_CHECK(err);
     }
     boots++;
+    /* set кладёт значение в кэш. На flash оно попадёт только в nvs_commit ниже. */
     ESP_ERROR_CHECK(nvs_set_i32(handle, "boots", boots));
 
     /*
@@ -86,6 +97,7 @@ void app_main(void)
      * флеш изнашивается от числа стираний, а не от числа переменных в программе.
      */
     ESP_ERROR_CHECK(nvs_commit(handle));
+    /* close отпускает ручку. Данные уже во flash, ручка больше не нужна. */
     nvs_close(handle);
 
     ESP_LOGI(TAG, "загрузка %" PRId32 " записана. Заметка теперь \"%s\"", boots, note);

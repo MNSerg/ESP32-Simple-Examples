@@ -16,9 +16,18 @@
  * button_task), только здесь он разобран по шагам и дополнен антидребезгом.
  */
 
-#include <inttypes.h>
+#include <inttypes.h> /* Макрос PRIu32: печатать uint32_t переносимым способом. */
 #include <stdbool.h>
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h — базовые типы. queue.h и task.h подключают после него.
+ * freertos/queue.h — очередь, почтовый ящик из прерывания в обычную задачу.
+ * freertos/task.h — xTaskCreate создаёт задачу, которая разбирает нажатия.
+ * driver/gpio.h — настроить вход, повесить обработчик на спад уровня,
+ *   прочитать gpio_get_level уже в задаче.
+ * esp_log.h — печать разрешена только в задаче, не в обработчике прерывания.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -66,6 +75,7 @@ static void IRAM_ATTR button_isr(void *arg)
 
 static void button_task(void *arg)
 {
+    /* xTaskCreate передала NULL. Подавляем предупреждение о неиспользуемом аргументе. */
     (void)arg;
     uint32_t gpio = 0;
     int presses = 0;
@@ -121,6 +131,7 @@ void app_main(void)
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
+    /* ESP_ERROR_CHECK остановит программу, если вывод не удалось настроить. */
     ESP_ERROR_CHECK(gpio_config(&led));
     led_set(false);
 

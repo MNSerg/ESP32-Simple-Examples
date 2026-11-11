@@ -18,6 +18,14 @@
  *   oneshot  — один раз, через 5 секунд после старта.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h — типы планировщика, подключается до task.h и timers.h.
+ * freertos/task.h — vTaskDelay в задаче main, чтобы она не крутилась без паузы.
+ * freertos/timers.h — программные таймеры: xTimerCreate и xTimerStart.
+ *   Это не аппаратный таймер чипа, а служба внутри FreeRTOS.
+ * esp_log.h — печать из колбэка таймера и из main.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
@@ -25,7 +33,11 @@
 
 static const char *TAG = "sw_timer";
 
-/* Счётчик меняет только задача таймеров, читает — задача main. Для int этого достаточно. */
+/*
+ * volatile: переменную пишут в одной задаче, а читают в другой.
+ * Без volatile компилятор имеет право закэшировать старое значение
+ * в регистре и не увидеть новые тики.
+ */
 static volatile int s_ticks;
 
 static void periodic_callback(TimerHandle_t timer)

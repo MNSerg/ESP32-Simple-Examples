@@ -19,9 +19,17 @@
  * Для своих устройств берут SPI2.
  */
 
-#include <stdio.h>
-#include <string.h>
+#include <stdio.h>  /* snprintf собирает строку из байт для одной строки лога. */
+#include <string.h> /* memset обнуляет приёмный буфер, memcmp сравнивает его с отправленным. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза между обменами, чтобы лог не летел сплошняком.
+ * driver/gpio.h — номера выводов SCLK, MOSI, MISO и CS.
+ * driver/spi_master.h — мастер SPI: описать шину, повесить устройство, обменять буферы.
+ *   Пока мастер выдвигает бит на MOSI, устройство одновременно выдвигает бит на MISO.
+ * esp_log.h — показать отправленные и принятые байты.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -41,13 +49,13 @@ static spi_device_handle_t s_device;
 static void spi_setup(void)
 {
     spi_bus_config_t bus = {
-        .mosi_io_num = PIN_MOSI,
-        .miso_io_num = PIN_MISO,
-        .sclk_io_num = PIN_SCLK,
+        .mosi_io_num = PIN_MOSI, /* Выход мастера, вход устройства. */
+        .miso_io_num = PIN_MISO, /* Вход мастера, выход устройства. */
+        .sclk_io_num = PIN_SCLK, /* Такт. Его всегда выдаёт мастер. */
         /* Линии quad-SPI нужны только флешкам. Обычному устройству их нет. */
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = 32,
+        .max_transfer_sz = 32, /* Верхняя граница одной передачи в байтах. Нам хватает четырёх. */
     };
     /*
      * SPI_DMA_DISABLED: четыре байта процессор перенесёт сам.
@@ -56,11 +64,11 @@ static void spi_setup(void)
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &bus, SPI_DMA_DISABLED));
 
     spi_device_interface_config_t device = {
-        .clock_speed_hz = CLOCK_HZ,
+        .clock_speed_hz = CLOCK_HZ, /* 1 МГц. Для учебной микросхемы это спокойная скорость. */
         /* Режим 0: такт в покое низкий, данные фиксируются по переднему фронту. */
         .mode = 0,
-        .spics_io_num = PIN_CS,
-        .queue_size = 1,
+        .spics_io_num = PIN_CS, /* Драйвер сам опустит CS на время передачи и поднимет после. */
+        .queue_size = 1, /* Сколько транзакций можно поставить в очередь драйвера. Нам хватает одной. */
     };
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &device, &s_device));
 }

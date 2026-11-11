@@ -22,6 +22,15 @@
  * чип проснётся немедленно. Входите в сон при отпущенной кнопке.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — ждать, пока кнопку отпустят, и дать логу уйти.
+ * driver/gpio.h — настроить GPIO9 входом с подтяжкой и разрешить ему будить чип.
+ * esp_log.h — писать, чем именно чип проснулся. После лёгкого сна программа
+ *   продолжается со следующей строки, монитор не рвётся.
+ * esp_sleep.h — включить источники пробуждения и вызвать esp_light_sleep_start.
+ *   В отличие от глубокого сна, эта функция возвращает управление.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -48,11 +57,11 @@ static const char *cause_text(esp_sleep_wakeup_cause_t cause)
 static void button_setup(void)
 {
     gpio_config_t button = {
-        .pin_bit_mask = 1ULL << BUTTON_GPIO,
+        .pin_bit_mask = 1ULL << BUTTON_GPIO, /* Бит 9 в 64-битной маске — это GPIO9. */
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE, /* Пока кнопку не трогают, на входе стабильная 1. */
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE, /* Будит чип не прерывание GPIO, а отдельный источник сна. */
     };
     ESP_ERROR_CHECK(gpio_config(&button));
 
@@ -83,6 +92,10 @@ void app_main(void)
         ESP_LOGI(TAG, "сон %d. Память и переменные сохранятся", sleep_index);
         vTaskDelay(pdMS_TO_TICKS(50));
 
+        /*
+         * Процессор останавливается здесь. Строка ниже выполнится уже после
+         * пробуждения, переменная sleep_index при этом не сбросится.
+         */
         ESP_ERROR_CHECK(esp_light_sleep_start());
 
         esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();

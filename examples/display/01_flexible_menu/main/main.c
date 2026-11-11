@@ -11,9 +11,20 @@
  * На экране три строки, более длинный список прокручивается.
  */
 
-#include <stdio.h>
-#include <inttypes.h>
+#include <stdio.h>    /* snprintf собирает строку «контраст 128» и числа памяти. */
+#include <inttypes.h> /* PRIu32 печатает размер кучи, он имеет тип uint32_t. */
 
+/*
+ * Библиотеки:
+ * driver/gpio.h — кнопка GPIO9. Дисплейную шину этот заголовок не трогает,
+ *   её поднимает u8g2_esp32_hal.
+ * esp_log.h — дублировать действие меню в монитор, если на экран не смотрят.
+ * esp_system.h — esp_get_free_heap_size и минимум свободной кучи за время работы.
+ * esp_timer.h — esp_timer_get_time меряет, сколько держали кнопку, в микросекундах.
+ * freertos/FreeRTOS.h и task.h — короткие паузы антидребезга. Меню живёт в задаче main.
+ * u8g2.h — рисование: очистить буфер, выбрать шрифт, написать строку, вывести буфер.
+ * u8g2_esp32_hal.h — связать u8g2 с I2C ESP32: выводы, частота и функции обмена.
+ */
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -65,11 +76,15 @@ static int s_contrast = 128;
 
 static void show_lines(u8g2_t *u8g2, const char *a, const char *b, const char *c)
 {
+    /* Рисунок идёт в буфер в памяти. Пока SendBuffer не вызван, стекло не меняется. */
     u8g2_ClearBuffer(u8g2);
+    /* Координата y — базовая линия букв, не верх строки. 10, 22 и 34 умещают три строки. */
     u8g2_DrawUTF8(u8g2, 0, 10, a);
     u8g2_DrawUTF8(u8g2, 0, 22, b);
     u8g2_DrawUTF8(u8g2, 0, 34, c);
+    /* Отправить весь буфер 72×40 на дисплей одним обменом по I2C. */
     u8g2_SendBuffer(u8g2);
+    /* Подержать текст на экране, иначе меню тут же нарисуется поверх. */
     vTaskDelay(pdMS_TO_TICKS(1200));
 }
 
@@ -82,6 +97,7 @@ static void contrast_apply(u8g2_t *u8g2, int value)
         value = 255;
     }
     s_contrast = value;
+    /* 0 — картинка еле видна, 255 — максимальная яркость стекла. Команда уходит в контроллер OLED. */
     u8g2_SetContrast(u8g2, (uint8_t)s_contrast);
 }
 
@@ -114,6 +130,7 @@ static void action_heap(u8g2_t *u8g2)
 {
     char free_line[20];
     char min_line[20];
+    /* Свободно сейчас и минимум с момента загрузки. Второе показывает, не было ли провала. */
     snprintf(free_line, sizeof(free_line), "%" PRIu32, esp_get_free_heap_size());
     snprintf(min_line, sizeof(min_line), "мин %" PRIu32, esp_get_minimum_free_heap_size());
     ESP_LOGI(TAG, "heap %s, %s", free_line, min_line);
@@ -152,10 +169,19 @@ static bool display_init(void)
     config.i2c.port = I2C_NUM_0;
     config.i2c.clk_speed = 400000;
 
+    /*
+     * HAL открывает I2C и запоминает выводы. Если шина занята другим драйвером
+     * или вывод указан неверно, здесь вернётся ошибка, и дисплей не трогаем.
+     */
     if (u8g2_hal_init(&config) != ESP_OK) {
         return false;
     }
 
+    /*
+     * Профиль контроллера: SSD1306, шина I2C, стекло 72×40, полный буфер кадра.
+     * Суффикс _f означает, что рисунок копится в памяти и уходит на экран целиком.
+     * U8G2_R0 — без поворота. Две функции ниже — как u8g2 отдаёт байты в наш HAL.
+     */
     u8g2_Setup_ssd1306_i2c_72x40_er_f(
         &s_u8g2,
         U8G2_R0,
@@ -163,9 +189,20 @@ static bool display_init(void)
         u8g2_esp32_hal_gpio_and_delay_cb);
     /* u8g2 ждёт 8-битный адрес, 0x3C << 1 = 0x78. */
     u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1);
+    /* InitDisplay посылает контроллеру SSD1306 последовательность включения. */
     u8g2_InitDisplay(&s_u8g2);
+    /* 0 выключает спящий режим стекла. 1 погасило бы картинку, не стирая буфер. */
     u8g2_SetPowerSave(&s_u8g2, 0);
+    /*
+     * Шрифт 5×8 с кириллицей. Обычный u8g2_font_5x8_tr этих букв не содержит.
+     * Рисовать его нужно через DrawUTF8, DrawStr кириллицу из него не возьмёт.
+     */
     u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic);
+    /*
+     * Режим 1 — прозрачные буквы: рисуются только точки глифа.
+     * Так белая плашка выбранного пункта остаётся вокруг чёрных букв.
+     * В режиме 0 фон буквы закрасил бы плашку обратно.
+     */
     u8g2_SetFontMode(&s_u8g2, 1);
     contrast_apply(&s_u8g2, s_contrast);
     return true;
@@ -190,14 +227,17 @@ static void button_init(void)
  */
 static btn_event_t button_poll(void)
 {
+    /* Подтяжка держит единицу. Ноль — кнопку прижали к земле. */
     if (gpio_get_level(BUTTON_GPIO) != 0) {
         return BTN_NONE;
     }
+    /* 30 мс — антидребезг. Если за это время уровень вернулся в 1, это был дребезг. */
     vTaskDelay(pdMS_TO_TICKS(30));
     if (gpio_get_level(BUTTON_GPIO) != 0) {
         return BTN_NONE;
     }
 
+    /* Время в микросекундах с запуска чипа. Разница двух вызовов — длительность нажатия. */
     int64_t pressed_at = esp_timer_get_time();
     while (gpio_get_level(BUTTON_GPIO) == 0) {
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -227,12 +267,12 @@ static void draw_menu(const menu_frame_t *frame)
         int baseline = 20 + row * 10;
         bool selected = index == frame->cursor;
         if (selected) {
-            u8g2_SetDrawColor(&s_u8g2, 1);
-            u8g2_DrawBox(&s_u8g2, 0, baseline - 7, 68, 9);
-            u8g2_SetDrawColor(&s_u8g2, 0);
+            u8g2_SetDrawColor(&s_u8g2, 1); /* Цвет 1 зажигает пиксели. */
+            u8g2_DrawBox(&s_u8g2, 0, baseline - 7, 68, 9); /* Белая плашка выбранной строки. */
+            u8g2_SetDrawColor(&s_u8g2, 0); /* Дальше буквы рисуются чёрным, поверх плашки. */
         }
         u8g2_DrawUTF8(&s_u8g2, 2, baseline, frame->items[index].title);
-        u8g2_SetDrawColor(&s_u8g2, 1);
+        u8g2_SetDrawColor(&s_u8g2, 1); /* Вернуть обычный цвет для следующей строки. */
     }
 
     if (frame->count > VISIBLE_ROWS) {
@@ -274,12 +314,14 @@ static void menu_run(void)
 
         menu_frame_t *frame = &stack[depth];
         if (event == BTN_SHORT) {
+            /* Следующий пункт по кругу: после последнего снова первый. */
             frame->cursor = (frame->cursor + 1) % frame->count;
             dirty = true;
             continue;
         }
 
         const menu_item_t *item = &frame->items[frame->cursor];
+        /* Подменю кладётся на стек экранов. Возврат снимет верхний кадр. */
         if (item->kind == ITEM_SUBMENU && depth + 1 < MENU_DEPTH) {
             depth++;
             stack[depth] = (menu_frame_t){

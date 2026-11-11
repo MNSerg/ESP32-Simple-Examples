@@ -25,6 +25,15 @@
  * продолжит кормить сторож даже когда основной цикл уже мёртв.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза в одну секунду. Пока задача спит,
+ *   она не кормит сторож, и именно это в конце примера его и срабатывает.
+ * esp_log.h — журнал.
+ * esp_system.h — esp_reset_reason говорит, почему чип загрузился в этот раз.
+ * esp_task_wdt.h — подписать задачу на сторож и сбросить его таймер.
+ *   Таймаут 3 секунды задан не здесь, а в sdkconfig.defaults.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -63,6 +72,7 @@ static const char *reset_reason_text(esp_reset_reason_t reason)
 
 void app_main(void)
 {
+    /* Читается один раз в начале: причина относится к загрузке, которая уже произошла. */
     esp_reset_reason_t reason = esp_reset_reason();
     ESP_LOGI(TAG, "причина этой загрузки: %s (%d)", reset_reason_text(reason), (int)reason);
 

@@ -27,6 +27,14 @@
  * длинными паузами: радио обязано просыпаться на маяки роутера.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — vTaskDelay на 3 секунды. Пока все задачи спят,
+ *   планировщик сам останавливает тик, и драйвер питания уводит чип в сон.
+ * esp_log.h — строки между паузами. По ним видно, что программа «просто ждёт».
+ * esp_pm.h — esp_pm_configure включает автоматический лёгкий сон и вилку частот.
+ *   esp_light_sleep_start в этом файле нет и не нужен.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -37,10 +45,11 @@ static const char *TAG = "pm";
 void app_main(void)
 {
     esp_pm_config_t power = {
-        .max_freq_mhz = 160,
-        .min_freq_mhz = 40,
-        .light_sleep_enable = true,
+        .max_freq_mhz = 160, /* Потолок, когда есть работа. Для C3 это штатные 160 МГц. */
+        .min_freq_mhz = 40,  /* Нижняя ступень. С неё же чип уходит в лёгкий сон. */
+        .light_sleep_enable = true, /* Разрешить сон, когда задачи только ждут. */
     };
+    /* Применить политику. Дальше сон случается сам, отдельного вызова сна нет. */
     ESP_ERROR_CHECK(esp_pm_configure(&power));
     ESP_LOGI(TAG, "автоматический лёгкий сон включён");
     ESP_LOGI(TAG, "между строками чип спит, хотя esp_light_sleep_start() в коде нет");

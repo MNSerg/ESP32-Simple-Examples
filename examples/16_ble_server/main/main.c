@@ -23,9 +23,28 @@
  * не вызвала sync_cb, радио ещё не объявляет имя, и звать ble_gap_adv_start рано.
  */
 
-#include <stdbool.h>
-#include <string.h>
+#include <stdbool.h> /* Включены ли уведомления счётчика. */
+#include <string.h>  /* memset обнуляет поля объявления, strlen считает имя. */
 
+/*
+ * Библиотеки ESP-IDF:
+ * freertos/FreeRTOS.h и task.h — задача, которая раз в секунду шлёт счётчик.
+ * driver/gpio.h — светодиод. Его байт пишет телефон в характеристику 0xFF01.
+ * esp_log.h — журнал подключений.
+ * nvs_flash.h — NimBLE хранит связки и настройки во flash. Без NVS стек не стартует.
+ *
+ * Библиотеки NimBLE, это и есть стек BLE:
+ * nimble/nimble_port.h — инициализация порта: связать контроллер радио и хост.
+ * nimble/nimble_port_freertos.h — запустить хост отдельной задачей FreeRTOS.
+ * host/ble_hs.h — хост: события GAP, объявление имени, старт рекламы.
+ * host/ble_uuid.h — макрос BLE_UUID16_DECLARE собирает 16-битный UUID.
+ * host/ble_gatt.h — описание сервиса и характеристик, чтение и запись значения.
+ * host/util/util.h — ble_hs_util_ensure_addr выбирает адрес, которым чип представляется.
+ * services/gap/ble_svc_gap.h — стандартный сервис GAP, в нём лежит имя устройства.
+ * services/gatt/ble_svc_gatt.h — стандартный сервис GATT, его требует стек.
+ * os/os_mbuf.h — цепочка буферов. Телефон читает и пишет значение через неё,
+ *   а не через обычный массив.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -78,12 +97,14 @@ static int gatt_access(uint16_t conn_handle, uint16_t attr_handle,
 
     if (attr_handle == s_led_value_handle) {
         if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+            /* Телефон читает байт. Кладём его в буфер ответа стека. */
             int rc = os_mbuf_append(ctxt->om, &s_led_byte, sizeof(s_led_byte));
             return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
         }
         if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
             uint8_t value = 0;
             uint16_t length = 0;
+            /* Запись телефона приходит цепочкой буферов. Складываем её в один байт. */
             int rc = ble_hs_mbuf_to_flat(ctxt->om, &value, sizeof(value), &length);
             if (rc != 0 || length != 1) {
                 return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -105,25 +126,25 @@ static int gatt_access(uint16_t conn_handle, uint16_t attr_handle,
 
 static const struct ble_gatt_svc_def s_services[] = {
     {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = BLE_UUID16_DECLARE(0x00FF),
+        .type = BLE_GATT_SVC_TYPE_PRIMARY, /* Основной сервис, его телефон видит в списке. */
+        .uuid = BLE_UUID16_DECLARE(0x00FF), /* Номер сервиса. В nRF Connect его вводят как 0x00FF. */
         .characteristics = (struct ble_gatt_chr_def[]){
             {
                 .uuid = BLE_UUID16_DECLARE(0xFF01),
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
-                .val_handle = &s_led_value_handle,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE, /* Телефону можно и читать, и писать. */
+                .val_handle = &s_led_value_handle, /* Стек запишет сюда номер характеристики после регистрации. */
             },
             {
                 .uuid = BLE_UUID16_DECLARE(0xFF02),
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY, /* Чтение и подписка на уведомления. */
                 .val_handle = &s_counter_value_handle,
             },
-            {0},
+            {0}, /* Ноль заканчивает список характеристик. Без него стек читает память дальше. */
         },
     },
-    {0},
+    {0}, /* Ноль заканчивает список сервисов. */
 };
 
 static int gap_event(struct ble_gap_event *event, void *arg);
@@ -198,11 +219,13 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 /* sync_cb вызывается один раз, когда контроллер и хост договорились. */
 static void on_sync(void)
 {
+    /* 0 — публичный адрес не обязателен, можно взять случайный статический. */
     int rc = ble_hs_util_ensure_addr(0);
     if (rc != 0) {
         ESP_LOGE(TAG, "нет BLE-адреса, rc=%d", rc);
         return;
     }
+    /* Узнать, каким типом адреса чип будет представляться в эфире, и сохранить его. */
     rc = ble_hs_id_infer_auto(0, &s_own_addr_type);
     if (rc != 0) {
         ESP_LOGE(TAG, "не удалось выбрать адрес, rc=%d", rc);
@@ -234,10 +257,12 @@ static void notify_task(void *arg)
             continue;
         }
         uint32_t value = s_counter;
+        /* Уведомление уходит не массивом, а буфером стека. Стек сам его освободит. */
         struct os_mbuf *buffer = ble_hs_mbuf_from_flat(&value, sizeof(value));
         if (buffer == NULL) {
             continue;
         }
+        /* Отдать буфер конкретному телефону в характеристику счётчика. */
         int rc = ble_gatts_notify_custom(s_conn_handle, s_counter_value_handle, buffer);
         if (rc != 0) {
             ESP_LOGW(TAG, "notify rc=%d", rc);
@@ -268,30 +293,36 @@ void app_main(void)
     led_apply(0);
 
     nvs_setup();
+    /* Связать контроллер радио и хост. Объявлять имя ещё рано: стек не синхронизирован. */
     ESP_ERROR_CHECK(nimble_port_init());
 
-    ble_hs_cfg.reset_cb = on_reset;
-    ble_hs_cfg.sync_cb = on_sync;
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
+    ble_hs_cfg.reset_cb = on_reset; /* Стек сам вызовет это, если его сбросят. */
+    ble_hs_cfg.sync_cb = on_sync;   /* И это — когда хост и контроллер договорились. */
+    ble_svc_gap_init();  /* Стандартный сервис с именем устройства. */
+    ble_svc_gatt_init(); /* Стандартный сервис GATT. Без него свой сервис не зарегистрировать. */
 
+    /* Посчитать, сколько памяти занять под таблицу атрибутов. Сами сервисы ещё не видны телефону. */
     int rc = ble_gatts_count_cfg(s_services);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_gatts_count_cfg rc=%d", rc);
         return;
     }
+    /* Положить сервисы в стек и заполнить val_handle каждой характеристики. */
     rc = ble_gatts_add_svcs(s_services);
     if (rc != 0) {
         ESP_LOGE(TAG, "ble_gatts_add_svcs rc=%d", rc);
         return;
     }
+    /* Имя, которое телефон покажет в списке найденных устройств. */
     rc = ble_svc_gap_device_name_set(DEVICE_NAME);
     if (rc != 0) {
         ESP_LOGE(TAG, "имя устройства не установлено, rc=%d", rc);
         return;
     }
+    /* Хранилище связок: куда стек запишет данные о сопряжении. */
     ble_store_config_init();
 
+    /* Запустить задачу хоста. Реклама начнётся уже из on_sync, не отсюда. */
     nimble_port_freertos_init(host_task);
     xTaskCreate(notify_task, "notify", 3072, NULL, 4, NULL);
     ESP_LOGI(TAG, "NimBLE запущен. Откройте nRF Connect и найдите %s", DEVICE_NAME);

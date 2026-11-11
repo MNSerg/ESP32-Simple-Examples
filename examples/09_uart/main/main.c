@@ -22,8 +22,15 @@
  * Не подавайте на эти выводы уровни 5 В.
  */
 
-#include <string.h>
+#include <string.h> /* strlen считает длину строки, которую отдаём в порт. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — pdMS_TO_TICKS задаёт, сколько ждать байт.
+ * driver/uart.h — драйвер последовательного порта: скорость, буфер, чтение и запись.
+ * driver/gpio.h — номера GPIO20 и GPIO21. uart.h сам эти константы не объявляет.
+ * esp_log.h — журнал в USB-монитор. Это другая линия, не тот UART, что в примере.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/uart.h"
@@ -41,12 +48,12 @@ static const char *TAG = "uart";
 static void uart_setup(void)
 {
     const uart_config_t config = {
-        .baud_rate = UART_BAUD,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .source_clk = UART_SCLK_DEFAULT,
+        .baud_rate = UART_BAUD,             /* Скорость. Собеседник обязан выбрать ту же. */
+        .data_bits = UART_DATA_8_BITS,      /* Восемь бит полезных данных в кадре. */
+        .parity = UART_PARITY_DISABLE,      /* Бита чётности нет, отсюда буква N в «8N1». */
+        .stop_bits = UART_STOP_BITS_1,      /* Один стоп-бит в конце кадра. */
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE, /* Линий RTS/CTS нет, поток не притормаживаем. */
+        .source_clk = UART_SCLK_DEFAULT,    /* Такт для делителя скорости выбирает драйвер. */
     };
 
     /*
@@ -57,7 +64,12 @@ static void uart_setup(void)
      * Очередь событий UART нам не нужна, поэтому её длина 0 и указатель NULL.
      */
     ESP_ERROR_CHECK(uart_driver_install(UART_PORT, RX_BUFFER_BYTES, 0, 0, NULL, 0));
+    /* Скорость и формат кадра. До этого вызова порт ещё не знает про 115200 8N1. */
     ESP_ERROR_CHECK(uart_param_config(UART_PORT, &config));
+    /*
+     * Последние два аргумента — RTS и CTS. UART_PIN_NO_CHANGE оставляет их
+     * неподключёнными: аппаратного управления потоком в примере нет.
+     */
     ESP_ERROR_CHECK(uart_set_pin(UART_PORT, UART_TX, UART_RX,
                                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
 }
@@ -70,6 +82,7 @@ void app_main(void)
     uart_setup();
 
     const char *hello = "\r\nESP32-C3 UART. Наберите текст, он вернётся обратно.\r\n";
+    /* uart_write_bytes принимает число байт, а не «строку до нуля», поэтому длина отдельно. */
     uart_write_bytes(UART_PORT, hello, strlen(hello));
 
     uint8_t buffer[128];

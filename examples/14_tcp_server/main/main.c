@@ -20,9 +20,18 @@
  * socket, bind, listen, accept, recv, send, close.
  */
 
-#include <errno.h>
-#include <string.h>
+#include <errno.h>  /* Номер ошибки сокета. LwIP кладёт его в errno, как обычный BSD-сокет. */
+#include <string.h> /* strncpy, strlen. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — отдельная задача сервера. accept в ней
+ *   блокируется, пока никто не подключился, и не мешает остальной системе.
+ * esp_event.h, esp_netif.h, esp_wifi.h, nvs_flash.h — поднять SoftAP,
+ *   чтобы у сервера был адрес 192.168.4.1 без домашнего роутера.
+ * esp_log.h — продублировать принятый текст в монитор.
+ * lwip/sockets.h — сокеты LwIP в стиле BSD: socket, bind, listen, accept, recv, send.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_event.h"
@@ -50,8 +59,10 @@ static void nvs_setup(void)
 
 static void ap_start(void)
 {
+    /* Стек TCP/IP нужен раньше сокетов: без него socket() не к чему привязать. */
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    /* Точка доступа со своим DHCP. Адрес платы после старта — 192.168.4.1. */
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -81,6 +92,11 @@ static void serve_client(int client)
 
     char buffer[128];
     while (true) {
+        /*
+         * recv читает уже принятые байты. Последний аргумент 0 — без флагов.
+         * Минус один байт оставляем под завершающий ноль, чтобы строку можно было печатать.
+         * Вызов блокирует задачу, пока клиент что-нибудь не пришлёт или не закроется.
+         */
         int received = recv(client, buffer, sizeof(buffer) - 1, 0);
         if (received < 0) {
             ESP_LOGW(TAG, "recv: errno %d", errno);
@@ -90,11 +106,13 @@ static void serve_client(int client)
             ESP_LOGI(TAG, "клиент закрыл соединение");
             break;
         }
-        buffer[received] = 0;
+        buffer[received] = 0; /* Ноль в конец, чтобы ESP_LOGI напечатал текст, а не мусор. */
         ESP_LOGI(TAG, "принято: %s", buffer);
+        /* send отдаёт байты в стек. 0 в конце — обычная отправка без флагов. */
         send(client, "echo: ", 6, 0);
         send(client, buffer, received, 0);
     }
+    /* close освобождает дескриптор клиента. Слушающий сокет при этом жив. */
     close(client);
 }
 
@@ -102,6 +120,10 @@ static void tcp_server_task(void *arg)
 {
     (void)arg;
 
+    /*
+     * AF_INET — адреса IPv4. SOCK_STREAM — поток байтов, то есть TCP, не UDP.
+     * Возврат — целое число, дескриптор. Отрицательное значение означает ошибку.
+     */
     int listen_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
     if (listen_fd < 0) {
         ESP_LOGE(TAG, "socket() не создал дескриптор, errno %d", errno);
@@ -109,12 +131,21 @@ static void tcp_server_task(void *arg)
         return;
     }
 
+    /*
+     * SO_REUSEADDR позволяет заново занять порт сразу после закрытия сервера.
+     * Иначе система несколько десятков секунд держит порт «занятым».
+     */
     int reuse = 1;
     setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     struct sockaddr_in address = {
         .sin_family = AF_INET,
+        /*
+         * htons переставляет байты порта в сетевой порядок.
+         * На бумаге порт 3333, в пакете байты лежат иначе, чем в памяти ESP32-C3.
+         */
         .sin_port = htons(TCP_PORT),
+        /* INADDR_ANY — слушать на всех своих адресах, в том числе на 192.168.4.1. */
         .sin_addr.s_addr = htonl(INADDR_ANY),
     };
     if (bind(listen_fd, (struct sockaddr *)&address, sizeof(address)) != 0) {

@@ -18,8 +18,19 @@
  * будет спорить с источником.
  */
 
-#include <inttypes.h>
+#include <inttypes.h> /* PRId64 и PRIu32 печатают ширину импульса и число отброшенных событий. */
 
+/*
+ * Библиотеки:
+ * driver/gpio.h — вход импульса, выходы мостов DRV8833, сон драйвера и nFAULT.
+ * esp_log.h — печать ширины и того, сколько шагов выбрано. В прерывании лог запрещён.
+ * esp_rom_sys.h — esp_rom_delay_us ждёт микросекунды между фазами двигателя.
+ *   vTaskDelay здесь груб: один тик FreeRTOS — это 10 мс, а шаг длится 2 мс.
+ * esp_timer.h — esp_timer_get_time в прерывании даёт время в микросекундах.
+ *   Разница фронта и спада — ширина импульса.
+ * freertos/FreeRTOS.h, queue.h, task.h — очередь из прерывания в задачу,
+ *   которая уже крутит двигатель. В прерывании двигатель не шагают.
+ */
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
@@ -70,7 +81,9 @@ static int s_phase;
 static void IRAM_ATTR pulse_isr(void *arg)
 {
     (void)arg;
+    /* Время с запуска чипа. Вызов можно делать из прерывания, ESP_LOGI — нельзя. */
     int64_t now = esp_timer_get_time();
+    /* Уровень после фронта: 1 — импульс начался, 0 — импульс кончился. */
     int level = gpio_get_level(PULSE_GPIO);
 
     if (level == 1) {
@@ -88,14 +101,24 @@ static void IRAM_ATTR pulse_isr(void *arg)
         return;
     }
     BaseType_t wake = pdFALSE;
+    /*
+     * FromISR не ждёт свободного места. Если очередь полна, импульс теряется,
+     * а счётчик потом напечатает задача. Третий аргумент сообщает, надо ли
+     * сразу отдать процессор задаче двигателя.
+     */
     if (xQueueSendFromISR(s_pulses, &width, &wake) != pdTRUE) {
         s_dropped++;
     }
+    /* Если задача двигателя важнее текущей, переключиться на неё сразу. */
     portYIELD_FROM_ISR(wake);
 }
 
 static void coils_write(int ain1, int ain2, int bin1, int bin2)
 {
+    /*
+     * Четыре входа DRV8833. Пара AIN — первая обмотка, пара BIN — вторая.
+     * Единица на входе включает соответствующий выход моста.
+     */
     gpio_set_level(AIN1_GPIO, ain1);
     gpio_set_level(AIN2_GPIO, ain2);
     gpio_set_level(BIN1_GPIO, bin1);
@@ -109,6 +132,10 @@ static void coils_off(void)
 
 static void step_once(int direction)
 {
+    /*
+     * direction равен +1 или -1. Прибавка 4 перед остатком не даёт отрицательному
+     * индексу уйти в минус: в Си остаток от отрицательного числа тоже отрицательный.
+     */
     s_phase = (s_phase + direction + 4) % 4;
     const int *row = STEP_SEQ[s_phase];
     coils_write(row[0], row[1], row[2], row[3]);
@@ -123,6 +150,7 @@ static void move_steps(int steps, int direction)
         return;
     }
 
+    /* Единица на nSLEEP выводит драйвер из сна. Пока здесь ноль, выходы мостов выключены. */
     gpio_set_level(NSLEEP_GPIO, 1);
     for (int i = 0; i < steps; i++) {
         step_once(direction);
@@ -174,9 +202,9 @@ static void stepper_task(void *arg)
 #if SELF_TEST
 static void pulse_out(uint32_t width_us)
 {
-    gpio_set_level(TEST_GPIO, 1);
-    esp_rom_delay_us(width_us);
-    gpio_set_level(TEST_GPIO, 0);
+    gpio_set_level(TEST_GPIO, 1); /* Фронт, с которого измерение начинает считать ширину. */
+    esp_rom_delay_us(width_us);   /* Держать единицу ровно заданное число микросекунд. */
+    gpio_set_level(TEST_GPIO, 0); /* Спад. Прерывание на GPIO4 посчитает разницу. */
 }
 
 static void generator_task(void *arg)
@@ -214,6 +242,7 @@ void app_main(void)
     output_low(BIN1_GPIO);
     output_low(BIN2_GPIO);
     output_low(NSLEEP_GPIO);
+    /* Сначала все входы мостов уже в нуле, и только потом драйвер выходит из сна. */
     gpio_set_level(NSLEEP_GPIO, 1);
 
     gpio_config_t fault = {

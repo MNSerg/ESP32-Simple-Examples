@@ -20,8 +20,21 @@
  * и WIFI_PASS ниже. Пароль WPA2 не короче 8 символов.
  */
 
-#include <string.h>
+#include <string.h> /* strncpy копирует имя сети и пароль в структуру драйвера. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h — типы планировщика.
+ * freertos/event_groups.h — набор битов «подключились» / «не вышло».
+ *   Обработчик события бит ставит, задача main его ждёт.
+ * esp_event.h — цикл событий. Wi-Fi не возвращает результат из esp_wifi_connect,
+ *   а присылает событие позже.
+ * esp_log.h — журнал подключения.
+ * esp_netif.h — сетевой интерфейс: через него стек TCP/IP получает адрес.
+ * esp_wifi.h — сам драйвер радио: режим станции, имя сети, запуск.
+ * nvs_flash.h — раздел flash, где драйвер хранит калибровку радио.
+ *   Без nvs_flash_init esp_wifi_init возвращает ошибку.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "esp_event.h"
@@ -42,6 +55,12 @@ static const char *TAG = "wifi_sta";
 static EventGroupHandle_t s_wifi_events;
 static int s_retry_count;
 
+/*
+ * arg — то, что передали при подписке, у нас NULL.
+ * base — семейство события: WIFI_EVENT или IP_EVENT.
+ * id — конкретное событие внутри семейства.
+ * data — структура с подробностями, её вид зависит от id.
+ */
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -83,22 +102,33 @@ static void nvs_setup(void)
 
 static void wifi_start(void)
 {
+    /* Группа битов создаётся пустой. Пока ни один бит не поднят, ждать её — значит спать. */
     s_wifi_events = xEventGroupCreate();
 
+    /* Поднять стек TCP/IP. Без него адрес от роутера некуда принять. */
     ESP_ERROR_CHECK(esp_netif_init());
+    /* Задача, которая раздаёт события подписчикам. Одна на всё приложение. */
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     /* Сетевой интерфейс станции: через него потом пойдёт TCP/IP. */
     esp_netif_create_default_wifi_sta();
 
+    /* Макрос заполняет размеры внутренних буферов драйвера значениями по умолчанию. */
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+    /* Драйвер радио создан, но сеть ещё не ищется и радио ещё молчит. */
     ESP_ERROR_CHECK(esp_wifi_init(&init));
 
+    /* Любое событие Wi-Fi (старт, обрыв) придёт в wifi_event_handler. */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, NULL));
+    /* Отдельная подписка: DHCP роутера выдал адрес. */
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, NULL));
 
-    wifi_config_t config = {0};
+    wifi_config_t config = {0}; /* Ноль во всех полях, чтобы в ssid не осталось мусора. */
+    /*
+     * Поля ssid и password — массивы байт фиксированной длины, не строки Си.
+     * strncpy копирует текст и оставляет место под завершающий ноль: минус 1.
+     */
     strncpy((char *)config.sta.ssid, WIFI_SSID, sizeof(config.sta.ssid) - 1);
     strncpy((char *)config.sta.password, WIFI_PASS, sizeof(config.sta.password) - 1);
     /*
@@ -108,7 +138,9 @@ static void wifi_start(void)
      */
     config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
+    /* Режим станции: чип клиент роутера, свою сеть он не раздаёт. */
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    /* Привязать имя и пароль к интерфейсу станции. До start() радио ещё молчит. */
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &config));
     /*
      * WIFI_PS_MIN_MODEM — модемный сон: между пакетами маяка радио засыпает,
@@ -116,6 +148,7 @@ static void wifi_start(void)
      * потребление, не отключая Wi-Fi совсем. Подробнее в примерах сна.
      */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
+    /* Старт радио. Подключение начнётся из обработчика WIFI_EVENT_STA_START. */
     ESP_ERROR_CHECK(esp_wifi_start());
 }
 
@@ -125,6 +158,12 @@ void app_main(void)
     nvs_setup();
     wifi_start();
 
+    /*
+     * Ждать, пока не появится любой из двух битов.
+     * Третий аргумент pdFALSE — биты после ожидания не сбрасывать.
+     * Четвёртый pdFALSE — хватит одного бита, не ждать оба сразу.
+     * portMAX_DELAY — ждать сколько угодно, задача при этом спит.
+     */
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
         pdFALSE, pdFALSE, portMAX_DELAY);
@@ -137,6 +176,7 @@ void app_main(void)
 
     while (true) {
         wifi_ap_record_t ap = {0};
+        /* Снимок роутера, к которому чип подключён сейчас: имя, канал, уровень сигнала. */
         if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
             ESP_LOGI(TAG, "роутер \"%s\", канал %u, RSSI %d дБм",
                      (char *)ap.ssid, ap.primary, ap.rssi);

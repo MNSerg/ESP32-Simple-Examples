@@ -21,10 +21,21 @@
  * а маленький интерфейс.
  */
 
-#include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
+#include <stdbool.h> /* Состояние светодиода: включён или нет. */
+#include <stdio.h>   /* snprintf собирает HTML-страницу в буфер. */
+#include <string.h>  /* strncpy для имени сети. */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — типы FreeRTOS. Сервер HTTP живёт в своих
+ *   задачах, которые создаёт сам esp_http_server, нам xTaskCreate не нужен.
+ * driver/gpio.h — светодиод GPIO8, его переключают ссылки на странице.
+ * esp_event.h, esp_netif.h, esp_wifi.h, nvs_flash.h — поднять точку доступа,
+ *   чтобы телефон открыл http://192.168.4.1/ без роутера.
+ * esp_http_server.h — принять GET, найти путь и вызвать нашу функцию.
+ *   Текст запроса «GET /click HTTP/1.1» вручную разбирать не нужно.
+ * esp_log.h — журнал кликов.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -104,9 +115,12 @@ static esp_err_t send_page(httpd_req_t *request)
         s_clicks, s_led_on ? "включён" : "выключен");
 
     if (length < 0 || length >= (int)sizeof(page)) {
+        /* Буфер кончился раньше страницы. Честнее ответить ошибкой, чем обрезанным HTML. */
         return httpd_resp_send_500(request);
     }
+    /* Заголовок Content-Type. Без charset браузер может показать русские буквы крокозябрами. */
     httpd_resp_set_type(request, "text/html; charset=utf-8");
+    /* Отдать тело целиком. length — число байт, библиотека сама допишет заголовки HTTP. */
     return httpd_resp_send(request, page, length);
 }
 
@@ -137,14 +151,19 @@ static esp_err_t led_get(httpd_req_t *request)
 
 static void http_start(void)
 {
+    /*
+     * HTTPD_DEFAULT_CONFIG — порт 80, несколько задач сервера, размер стека.
+     * Для трёх коротких страниц менять там нечего.
+     */
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     httpd_handle_t server = NULL;
+    /* httpd_start начинает слушать порт. Пока обработчики не зарегистрированы, путей нет. */
     ESP_ERROR_CHECK(httpd_start(&server, &config));
 
     const httpd_uri_t root = {
-        .uri = "/",
-        .method = HTTP_GET,
-        .handler = root_get,
+        .uri = "/",             /* Путь из строки запроса, без имени хоста. */
+        .method = HTTP_GET,     /* Только чтение страницы. POST этот пример не принимает. */
+        .handler = root_get,    /* Функция, которую сервер вызовет на этот путь. */
     };
     const httpd_uri_t click = {
         .uri = "/click",
@@ -156,6 +175,7 @@ static void http_start(void)
         .method = HTTP_GET,
         .handler = led_get,
     };
+    /* Пока путь не зарегистрирован, запрос к нему получит ответ 404. */
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &click));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &led));

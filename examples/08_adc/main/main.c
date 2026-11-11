@@ -21,6 +21,15 @@
  * Этот пример читает только ADC1.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза полсекунды между измерениями.
+ * esp_adc/adc_oneshot.h — одно измерение по вызову, без непрерывного потока.
+ *   Старый driver/adc.h в ESP-IDF 6 удалён, поэтому заголовок именно такой.
+ * esp_adc/adc_cali.h — перевод сырого кода АЦП в милливольты.
+ * esp_adc/adc_cali_scheme.h — заводская калибровка curve fitting, она есть на C3.
+ * esp_log.h — печать сырого кода и напряжения.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_adc/adc_oneshot.h"
@@ -51,15 +60,17 @@ static adc_cali_handle_t s_cali;
 static void adc_setup(void)
 {
     adc_oneshot_unit_init_cfg_t unit = {
-        .unit_id = ADC_UNIT_1,
-        .ulp_mode = ADC_ULP_MODE_DISABLE,
+        .unit_id = ADC_UNIT_1, /* ADC1 не конфликтует с Wi-Fi. ADC2 на C3 с радио делит ресурсы. */
+        .ulp_mode = ADC_ULP_MODE_DISABLE, /* Сопроцессор ULP в этом примере не измеряет. */
     };
+    /* Ручка блока АЦП. Дальше все чтения идут через s_adc, не через номер блока. */
     ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit, &s_adc));
 
     adc_oneshot_chan_cfg_t channel = {
-        .atten = ADC_ATTEN,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN, /* Ослабление выбирает диапазон. DB_12 покрывает 0…3.3 В. */
+        .bitwidth = ADC_BITWIDTH_DEFAULT, /* На C3 это 12 бит, сырое значение 0…4095. */
     };
+    /* Привязать канал GPIO4 к уже созданному блоку. Пока канал не настроен, читать нечего. */
     ESP_ERROR_CHECK(adc_oneshot_config_channel(s_adc, ADC_CHANNEL, &channel));
 
     /*

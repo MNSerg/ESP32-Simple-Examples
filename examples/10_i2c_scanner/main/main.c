@@ -22,8 +22,13 @@
  * коротких проводов тоже включают — они слабее внешних, но как добавка годны.
  */
 
-#include <stdio.h>
-
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза 5 секунд между обходами адресов.
+ * driver/i2c_master.h — новый мастер I2C в ESP-IDF 6. Здесь из него нужны
+ *   создание шины и i2c_master_probe: спросить адрес и дождаться ACK или NACK.
+ * esp_log.h — список найденных адресов печатается в монитор, не на дисплей.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
@@ -42,13 +47,17 @@ static i2c_master_bus_handle_t s_bus;
 static void i2c_setup(void)
 {
     i2c_master_bus_config_t bus = {
-        .i2c_port = I2C_PORT,
-        .sda_io_num = I2C_SDA,
-        .scl_io_num = I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        .i2c_port = I2C_PORT, /* На ESP32-C3 контроллер один, это I2C_NUM_0. */
+        .sda_io_num = I2C_SDA, /* Линия данных. Её ведут и мастер, и микросхемы. */
+        .scl_io_num = I2C_SCL, /* Линия такта. Её выдаёт только мастер. */
+        .clk_source = I2C_CLK_SRC_DEFAULT, /* Источник такта выбирает драйвер. */
+        .glitch_ignore_cnt = 7, /* Короткие иглы на линии короче 7 тактов контроллера игнорируются. */
+        .flags.enable_internal_pullup = true, /* Слабые подтяжки чипа. Внешние резисторы модуля всё равно нужны. */
     };
+    /*
+     * i2c_new_master_bus включает контроллер и возвращает ручку шины.
+     * Устройств на шине эта функция ещё не ищет.
+     */
     ESP_ERROR_CHECK(i2c_new_master_bus(&bus, &s_bus));
 }
 
@@ -65,9 +74,9 @@ static void demo_write_ssd1306(uint8_t address)
 {
 #if I2C_DEMO_WRITE
     i2c_device_config_t device = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = address,
-        .scl_speed_hz = I2C_FREQ_HZ,
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7, /* Обычный 7-битный адрес, не 10-битный. */
+        .device_address = address,            /* Тот адрес, который только что ответил сканеру. */
+        .scl_speed_hz = I2C_FREQ_HZ,          /* Скорость уже этой микросхемы, не всей шины. */
     };
     i2c_master_dev_handle_t dev = NULL;
     ESP_ERROR_CHECK(i2c_master_bus_add_device(s_bus, &device, &dev));

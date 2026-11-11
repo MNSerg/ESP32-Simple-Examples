@@ -16,6 +16,16 @@
  * значение и время, а промежуточные шаги делает железо.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза между фазами «разгорается» и «гаснет».
+ *   Саму яркость во время паузы меняет периферия, процессор только ждёт.
+ * driver/gpio.h — номер вывода GPIO_NUM_8. Сам ШИМ вывод переключает LEDC,
+ *   но тип gpio_num_t объявлен в этом заголовке.
+ * driver/ledc.h — аппаратный генератор ШИМ: частота, скважность и плавное
+ *   изменение скважности без участия цикла программы.
+ * esp_log.h — сообщения о том, в какую сторону сейчас меняется яркость.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -68,21 +78,22 @@ static uint32_t duty_for_brightness(int percent)
 static void ledc_setup(void)
 {
     ledc_timer_config_t timer = {
-        .speed_mode = LEDC_MODE,
-        .duty_resolution = LEDC_DUTY_BITS,
-        .timer_num = LEDC_TIMER,
-        .freq_hz = LEDC_FREQ_HZ,
-        .clk_cfg = LEDC_AUTO_CLK,
+        .speed_mode = LEDC_MODE,          /* На C3 доступен только низкоскоростной режим. */
+        .duty_resolution = LEDC_DUTY_BITS, /* 13 бит: яркость задаётся числом 0…8191. */
+        .timer_num = LEDC_TIMER,          /* Какой из аппаратных таймеров LEDC брать. */
+        .freq_hz = LEDC_FREQ_HZ,          /* Как часто вывод переключается, здесь 5 кГц. */
+        .clk_cfg = LEDC_AUTO_CLK,         /* Источник такта драйвер подберёт сам. */
     };
+    /* Таймер задаёт частоту. К выводу он пока не привязан. */
     ESP_ERROR_CHECK(ledc_timer_config(&timer));
 
     ledc_channel_config_t channel = {
-        .gpio_num = LED_GPIO,
+        .gpio_num = LED_GPIO,  /* Какой вывод переключать. */
         .speed_mode = LEDC_MODE,
-        .channel = LEDC_CHANNEL,
-        .timer_sel = LEDC_TIMER,
-        .duty = duty_for_brightness(0),
-        .hpoint = 0,
+        .channel = LEDC_CHANNEL, /* Канал хранит скважность и номер вывода. */
+        .timer_sel = LEDC_TIMER, /* Частоту канал берёт у таймера, настроенного выше. */
+        .duty = duty_for_brightness(0), /* Стартуем с погашенного светодиода. */
+        .hpoint = 0, /* Момент внутри периода, когда начинается импульс. 0 — с начала. */
     };
     ESP_ERROR_CHECK(ledc_channel_config(&channel));
 

@@ -15,6 +15,13 @@
  * Как найти такой датчик на шине, показано в примере 10.
  */
 
+/*
+ * Библиотеки:
+ * freertos/FreeRTOS.h и task.h — пауза секунда между измерениями.
+ * driver/temperature_sensor.h — внутренний датчик кристалла: установить,
+ *   включить и прочитать градусы. Это не внешний датчик на I2C.
+ * esp_log.h — печать температуры. На дисплей пример ничего не выводит.
+ */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/temperature_sensor.h"
@@ -25,14 +32,21 @@ static const char *TAG = "temp";
 void app_main(void)
 {
     temperature_sensor_handle_t sensor = NULL;
+    /*
+     * Макрос заполняет структуру окном 10…50 °C. Драйвер по окну выбирает
+     * внутренние коэффициенты. Это ожидаемый диапазон, не ограничение вывода.
+     */
     temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(10, 50);
+    /* install готовит датчик и отдаёт ручку. Измерять ещё нельзя. */
     ESP_ERROR_CHECK(temperature_sensor_install(&config, &sensor));
+    /* enable включает измерение. После этого get_celsius возвращает градусы. */
     ESP_ERROR_CHECK(temperature_sensor_enable(sensor));
     ESP_LOGI(TAG, "датчик включён, окно %d…%d °C. Это температура кристалла",
              10, 50);
 
     while (true) {
         float celsius = 0.0f;
+        /* Один отсчёт. Функция сама дожидается готовности датчика. */
         ESP_ERROR_CHECK(temperature_sensor_get_celsius(sensor, &celsius));
         ESP_LOGI(TAG, "%.2f °C", celsius);
         vTaskDelay(pdMS_TO_TICKS(1000));

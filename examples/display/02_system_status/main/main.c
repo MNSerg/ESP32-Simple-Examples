@@ -9,9 +9,20 @@
  * Пока чип только что включился, она близка к температуре платы.
  */
 
-#include <stdio.h>
-#include <inttypes.h>
+#include <stdio.h>    /* snprintf собирает строки для экрана. */
+#include <inttypes.h> /* PRIu32 и PRId64 печатают кучу и секунды без обрезки типа. */
 
+/*
+ * Библиотеки:
+ * driver/gpio.h — кнопка GPIO9, она листает страницы.
+ * driver/temperature_sensor.h — датчик внутри кристалла, не температура воздуха.
+ * esp_idf_version.h — esp_get_idf_version возвращает строку версии ESP-IDF.
+ * esp_log.h — те же строки, что на стекле, дублируются в монитор.
+ * esp_system.h — свободная куча и esp_reset_reason, причина последней перезагрузки.
+ * esp_timer.h — микросекунды с запуска. Делим на 1 000 000 и получаем секунды работы.
+ * freertos/FreeRTOS.h и task.h — антидребезг кнопки и пауза между проверками.
+ * u8g2.h и u8g2_esp32_hal.h — буфер кадра OLED и привязка этого буфера к I2C.
+ */
 #include "driver/gpio.h"
 #include "driver/temperature_sensor.h"
 #include "esp_idf_version.h"
@@ -70,16 +81,17 @@ static bool display_init(void)
         return false;
     }
 
+    /* Профиль SSD1306 72×40. _f — полный буфер: рисуем в памяти, потом одним разом на стекло. */
     u8g2_Setup_ssd1306_i2c_72x40_er_f(
         &s_u8g2,
         U8G2_R0,
         u8g2_esp32_hal_i2c_byte_cb,
         u8g2_esp32_hal_gpio_and_delay_cb);
     u8x8_SetI2CAddress(&s_u8g2.u8x8, OLED_ADDR << 1);
-    u8g2_InitDisplay(&s_u8g2);
-    u8g2_SetPowerSave(&s_u8g2, 0);
-    u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic);
-    u8g2_SetContrast(&s_u8g2, 128);
+    u8g2_InitDisplay(&s_u8g2);      /* Последовательность включения контроллера SSD1306. */
+    u8g2_SetPowerSave(&s_u8g2, 0);  /* 0 выводит стекло из сна. */
+    u8g2_SetFont(&s_u8g2, u8g2_font_5x8_t_cyrillic); /* Кириллица есть, но её рисует только DrawUTF8. */
+    u8g2_SetContrast(&s_u8g2, 128); /* Середина диапазона 0…255, чтобы текст было видно. */
     return true;
 }
 
@@ -136,6 +148,7 @@ static void draw_page(int page)
     case 0:
         title = "Чип";
         snprintf(line2, sizeof(line2), "ESP32-C3");
+        /* Частота берётся из sdkconfig, это та частота, с которой собран проект. */
         snprintf(line3, sizeof(line3), "%d МГц", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
         break;
     case 1:
@@ -144,6 +157,7 @@ static void draw_page(int page)
         snprintf(line3, sizeof(line3), "мин %" PRIu32, esp_get_minimum_free_heap_size());
         break;
     case 2: {
+        /* esp_timer_get_time — микросекунды. Целое деление даёт прошедшие секунды. */
         int64_t seconds = esp_timer_get_time() / 1000000;
         title = "Время";
         snprintf(line2, sizeof(line2), "%" PRId64 " с", seconds);
@@ -158,12 +172,13 @@ static void draw_page(int page)
         } else {
             snprintf(line2, sizeof(line2), "--");
         }
+        /* %.8s берёт начало строки версии: на узком экране длинный суффикс не влезает. */
         snprintf(line3, sizeof(line3), "IDF %.8s", esp_get_idf_version());
         break;
     }
     }
 
-    u8g2_ClearBuffer(&s_u8g2);
+    u8g2_ClearBuffer(&s_u8g2); /* Стереть прошлую страницу в буфере, не на стекле. */
     u8g2_DrawUTF8(&s_u8g2, 0, 10, title);
     u8g2_DrawUTF8(&s_u8g2, 0, 22, line2);
     u8g2_DrawUTF8(&s_u8g2, 0, 34, line3);
