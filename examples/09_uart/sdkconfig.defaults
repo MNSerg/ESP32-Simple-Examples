@@ -1,0 +1,4 @@
+CONFIG_IDF_TARGET="esp32c3"
+# Монитор idf.py на ESP32-C3 идёт через встроенный USB.
+# UART из этого примера — отдельная пара выводов, не путать с монитором.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y

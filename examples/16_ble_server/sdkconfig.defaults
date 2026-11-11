@@ -1,0 +1,5 @@
+CONFIG_IDF_TARGET="esp32c3"
+# На ESP32-C3 классического Bluetooth нет, только BLE.
+# NimBLE — более компактный стек, чем Bluedroid, для одного сервера его достаточно.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y

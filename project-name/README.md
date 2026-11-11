@@ -1,32 +1,46 @@
-# _Sample project_
+# Дисплей OLED и кнопка
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+Это исходный проект репозитория. Плата ESP32-C3 рисует на OLED 72×40 (контроллер SSD1306, адрес `0x3C`) и по кнопке переключает шесть демонстраций: текст, фигуры, точки, полоска прогресса, картинка-стрелка, прыгающий мяч.
 
-This is the simplest buildable example. The example is used by command `idf.py create-project`
-that copies the project to user specified path and set it's name. For more information follow the [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project)
+Остальные темы (таймеры, UART, SPI, Wi-Fi, BLE, сон) вынесены в каталог [`examples`](../examples/README.md), чтобы этот проект оставался рабочей программой с дисплеем.
 
+## Выводы
 
+| Сигнал | GPIO | Как в коде |
+| --- | --- | --- |
+| I2C SDA | 5 | `I2C_SDA_GPIO` |
+| I2C SCL | 6 | `I2C_SCL_GPIO` |
+| Кнопка на GND | 9 | `BUTTON_PIN` |
+| Адрес дисплея | — | `OLED_ADDR` = `0x3C` |
 
-## How to use example
-We encourage the users to use the example as a template for the new projects.
-A recommended way is to follow the instructions on a [docs page](https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#start-a-new-project).
+Кнопка активна нулём: внутренняя подтяжка держит GPIO9 в единице, нажатие замыкает его на землю. На многих платах ESP32-C3 так подключён BOOT, отдельная кнопка не обязательна.
 
-## Example folder contents
+Библиотека экрана — [u8g2](https://github.com/olikraus/u8g2) через компонент `u8g2_esp32_hal`. Зависимость записана в `main/idf_component.yml` и при первой сборке скачивается из интернета.
 
-The project **sample_project** contains one source file in C language [main.c](main/main.c). The file is located in folder [main](main).
+## Как устроена программа
 
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt`
-files that provide set of directives and instructions describing the project's source files and targets
-(executable, library, or both). 
+`app_main` делает три вещи.
 
-Below is short explanation of remaining files in the project folder.
+1. Настраивает I2C (GPIO5, GPIO6, 400 кГц) и поднимает драйвер u8g2 профилем `ssd1306_i2c_72x40`. Адрес в u8g2 передаётся сдвинутым влево на 1: библиотека ждёт 8-битный вид, а в даташите дисплея обычно указан 7-битный `0x3C`.
+2. Вешает на GPIO9 прерывание по спаду. Обработчик `isr_handler` только кладёт номер вывода в очередь. Задача `button_task` забирает событие, печатает его и меняет глобальную переменную `a` по кругу от 0 до 5. Пауза 50 мс в задаче — простой антидребезг.
+3. В цикле вызывает одну из функций `demo_*` в зависимости от `a`. Каждая функция сама рисует кадр и ждёт несколько секунд, поэтому смена режима видна после того, как текущая демонстрация доиграет до конца. Дольше всех длится мяч: около 136 кадров по 50 мс.
 
+Рисунок всегда идёт в буфер в памяти (`u8g2_ClearBuffer`, команды рисования, затем `u8g2_SendBuffer`). Пока `SendBuffer` не вызван, на стекле ничего не меняется. Так устроен весь полнобуферный режим u8g2, суффикс `_f` в имени профиля `72x40_er_f` как раз про это.
+
+Прерывание кнопки разобрано отдельно и с более спокойным антидребезгом в [`examples/03_button_interrupt`](../examples/03_button_interrupt/README.md). Шина, на которой сидит дисплей, — в [`examples/10_i2c_scanner`](../examples/10_i2c_scanner/README.md): сканер должен увидеть адрес `0x3C`, не стирая картинку. Меню и экран характеристик на том же OLED — в [`examples/display`](../examples/display/README.md). Запись команды дисплею и чтение байта состояния — в [`examples/24_i2c_transfer`](../examples/24_i2c_transfer/README.md).
+
+## Сборка
+
+Проект собирался в ESP-IDF 6.1 под цель `esp32c3`.
+
+```bash
+. $HOME/esp/esp-idf/export.sh
+cd project-name
+idf.py set-target esp32c3
+idf.py build
+idf.py -p /dev/ttyACM0 flash monitor
 ```
-├── CMakeLists.txt
-├── main
-│   ├── CMakeLists.txt
-│   └── main.c
-└── README.md                  This is the file you are currently reading
-```
-Additionally, the sample project contains Makefile and component.mk files, used for the legacy Make based build system. 
-They are not used or needed when building with CMake and idf.py.
+
+Первая сборка качает `u8g2` и `u8g2_esp32_hal`. Без сети на этом шаге она остановится: в отличие от каталога `examples`, здесь есть внешний компонент.
+
+Нажатие кнопки печатает в монитор `Button pressed! GPIO 9` и переключает картинку на экране.
